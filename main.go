@@ -124,7 +124,7 @@ func writePostings(input, pageTablePath, postingsPath string, limit int, show bo
 }
 
 // Emit receives one posting per term occurrence. The term slice is reused
-// between calls: copy it if you need to keep it.
+// between calls
 type Emit func(term []byte, docID uint32)
 
 // parse reads "pid<TAB>text" lines, assigns docIDs in parse order starting
