@@ -7,7 +7,7 @@
 //
 // Output: pagetable.tsv in -dir (default ./data), containing
 // docID <TAB> pid <TAB> length_in_terms.
-// Term occurrences are buffered and written to postings.tsv as term <TAB> docID.
+// Term occurrences are buffered and written to postings-NNNNNN.tsv as term <TAB> docID.
 package main
 
 import (
@@ -29,14 +29,14 @@ import (
 // Terms longer than this are dropped - Need to edit
 const maxTermLen = 64
 
-const postingBufferSize = 1 << 20
+const postingBufferSize = 64 << 20 // 64 MiB per sorted run, plus sorting overhead.
 
 var postingBufferPool = sync.Pool{
 	New: func() any { return new(bytes.Buffer) },
 }
 
 // writeSortedChunk sorts one batch by term, then by numeric docID.
-// Batches remain independent sorted runs; the entire file is not globally sorted.
+// Each batch is an independent sorted run.
 func writeSortedChunk(buffer *bytes.Buffer, out io.Writer) error {
 	if buffer.Len() == 0 {
 		return nil
@@ -76,17 +76,7 @@ func writeSortedChunk(buffer *bytes.Buffer, out io.Writer) error {
 	return nil
 }
 
-func writePostings(input, pageTablePath, postingsPath string, limit int, show bool) (docs, tokens uint64, err error) {
-	out, err := os.Create(postingsPath)
-	if err != nil {
-		return 0, 0, err
-	}
-	defer func() {
-		if closeErr := out.Close(); err == nil {
-			err = closeErr
-		}
-	}()
-
+func writePostings(input, pageTablePath, postingsDir string, limit int, show bool) (docs, tokens uint64, err error) {
 	buffer := postingBufferPool.Get().(*bytes.Buffer)
 	buffer.Reset()
 	defer func() {
@@ -95,10 +85,22 @@ func writePostings(input, pageTablePath, postingsPath string, limit int, show bo
 	}()
 
 	var writeErr error
+	run := 0
 	flush := func() {
-		if writeErr == nil {
-			writeErr = writeSortedChunk(buffer, out)
+		if writeErr != nil || buffer.Len() == 0 {
+			return
 		}
+		path := filepath.Join(postingsDir, fmt.Sprintf("postings-%06d.tsv", run))
+		out, createErr := os.Create(path)
+		if createErr != nil {
+			writeErr = createErr
+			return
+		}
+		writeErr = writeSortedChunk(buffer, out)
+		if closeErr := out.Close(); writeErr == nil {
+			writeErr = closeErr
+		}
+		run++
 	}
 	emit := func(term []byte, docID uint32) {
 		if writeErr != nil {
@@ -214,7 +216,7 @@ func parse(tsvPath, pageTablePath string, limit int, emit Emit) (docs, tokens ui
 
 func main() {
 	input := flag.String("input", "data/collection.tsv", "unpacked passage collection")
-	dir := flag.String("dir", "data", "output directory for pagetable.tsv and postings.tsv")
+	dir := flag.String("dir", "data", "output directory for pagetable.tsv and postings-NNNNNN.tsv runs")
 	limit := flag.Int("limit", 0, "parse only the first N passages (0 = all)")
 	show := flag.Bool("show", false, "print every posting (use with a small -limit)")
 	cpuProfile := flag.String("cpuprofile", "", "write CPU profile to this file")
@@ -239,7 +241,7 @@ func main() {
 	fmt.Println("parsing", *input)
 	start := time.Now()
 
-	// Original emit callback and direct parse call, kept for reference:
+	// Original emit callback and direct parse call, kept for reference - will delete later
 	// emit := func(term []byte, docID uint32) {
 	// 	if *show {
 	// 		fmt.Printf("%-64s %d\n", term, docID)
@@ -247,7 +249,7 @@ func main() {
 	// }
 	// docs, tokens, err := parse(*input, filepath.Join(*dir, "pagetable.tsv"), *limit, emit)
 
-	docs, tokens, err := writePostings(*input, filepath.Join(*dir, "pagetable.tsv"), filepath.Join(*dir, "postings.tsv"), *limit, *show)
+	docs, tokens, err := writePostings(*input, filepath.Join(*dir, "pagetable.tsv"), *dir, *limit, *show)
 	elapsed := time.Since(start)
 	if cpuFile != nil {
 		pprof.StopCPUProfile()
