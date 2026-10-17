@@ -26,6 +26,18 @@ type runReader struct {
 	order          int
 }
 
+type indexOutput struct {
+	files                                          []*os.File
+	postings_writer, blocks_writer, lexicon_writer *bufio.Writer
+	postings_offset, blocks_offset                 uint64
+	incomplete_marker                              string
+}
+
+type runDocumentRange struct {
+	min_doc_id, max_doc_id uint64
+	has_postings           bool
+}
+
 func openRun(filepath string, order int) (*runReader, error) {
 	file, e := os.Open(filepath)
 	if e != nil {
@@ -182,227 +194,321 @@ func validate_metadata(input_path string, blockSize int) (meta []byte, numDocs, 
 	return meta, numDocs, expected, paths, nil
 }
 
-// Merge creates a new output directory final-index with the final compressed index
-// Input must contain runs/, pagetable.bin and meta.txt from the Rust parser.
+// Merge validates the inputs, merges one complete term at a time, and finalizes
+// a new output directory. Input runs and the on-disk formats remain unchanged.
 func Merge(input_path, output_path string, blockSize int) (stats Stats, err error) {
-	meta, numDocs, expected, paths, e := validate_metadata(input_path, blockSize)
-	if e != nil {
-		return stats, e
+	collection_metadata, document_count, expected_postings, run_paths, err := validate_metadata(input_path, blockSize)
+	if err != nil {
+		return stats, err
 	}
-	readers := make([]*runReader, 0, len(paths))
-	defer func() {
-		for _, r := range readers {
-			r.file.Close()
-		}
-	}()
-	var h runHeap
-	for i, p := range paths {
-		r, e := openRun(p, i)
-		if e != nil {
-			return stats, e
-		}
-		readers = append(readers, r)
-		ok, e := r.next()
-		if e != nil {
-			return stats, fmt.Errorf("%s: %w", p, e)
-		}
-		if ok {
-			heap.Push(&h, r)
-		}
+
+	run_readers, term_heap, err := openRunReaders(run_paths)
+	if err != nil {
+		return stats, err
 	}
-	if e = os.Mkdir(output_path, 0755); e != nil {
-		return stats, e
+	defer closeRunReaders(run_readers)
+
+	output, err := createIndexOutput(output_path)
+	if err != nil {
+		return stats, err
 	}
-	// A failed build remains marked incomplete, never as a completed index.
-	marker := filepath.Join(output_path, "INCOMPLETE")
-	if e = os.WriteFile(marker, []byte("merge in progress\n"), 0644); e != nil {
-		return stats, e
-	}
-	files := make([]*os.File, 0, 3)
-	defer func() {
-		for _, f := range files {
-			if e := f.Close(); err == nil {
-				err = e
-			}
-		}
-	}()
-	create := func(name string) (*os.File, error) {
-		f, e := os.Create(filepath.Join(output_path, name))
-		if e == nil {
-			files = append(files, f)
-		}
-		return f, e
-	}
-	pf, e := create("postings.bin")
-	if e != nil {
-		return stats, e
-	}
-	bf, e := create("blocks.bin")
-	if e != nil {
-		return stats, e
-	}
-	lf, e := create("lexicon.tsv")
-	if e != nil {
-		return stats, e
-	}
-	pw, bw, lw := bufio.NewWriterSize(pf, 4<<20), bufio.NewWriterSize(bf, 1<<20), bufio.NewWriterSize(lf, 1<<20)
-	if _, e = pw.WriteString("FIP1"); e != nil {
-		return stats, e
-	}
-	if _, e = bw.WriteString("FIB1"); e != nil {
-		return stats, e
-	}
-	if _, e = fmt.Fprintln(lw, "term\tdoc_frequency\tblocks_offset\tblock_count"); e != nil {
-		return stats, e
-	}
-	postOffset, blockOffset := uint64(4), uint64(4)
-	// Run doc ranges must not overlap, including for terms absent from a run.
-	mins, maxs := make([]uint64, len(readers)), make([]uint64, len(readers))
-	seen := make([]bool, len(readers))
-	for len(h) > 0 {
-		term := h[0].term
-		termStart := blockOffset
-		var df, nb, last uint64
-		haveLast := false
-		docs, freqs := make([]byte, 0, blockSize*3), make([]byte, 0, blockSize*2)
-		count := uint32(0)
-		var blockLast uint64
-		flush := func() error {
-			if count == 0 {
-				return nil
-			}
-			var header [24]byte
-			binary.LittleEndian.PutUint32(header[0:4], uint32(blockLast))
-			binary.LittleEndian.PutUint32(header[4:8], count)
-			binary.LittleEndian.PutUint64(header[8:16], postOffset)
-			binary.LittleEndian.PutUint32(header[16:20], uint32(len(docs)))
-			binary.LittleEndian.PutUint32(header[20:24], uint32(len(freqs)))
-			if _, e := bw.Write(header[:]); e != nil {
-				return e
-			}
-			if _, e := pw.Write(docs); e != nil {
-				return e
-			}
-			if _, e := pw.Write(freqs); e != nil {
-				return e
-			}
-			postOffset += uint64(len(docs) + len(freqs))
-			blockOffset += 24
-			nb++
-			stats.Blocks++
-			count = 0
-			docs = docs[:0]
-			freqs = freqs[:0]
-			return nil
-		}
-		for len(h) > 0 && h[0].term == term {
-			r := heap.Pop(&h).(*runReader)
-			dr, fr := bytes.NewReader(r.docs), bytes.NewReader(r.freqs)
-			var doc uint64
-			for i := uint64(0); i < r.count; i++ {
-				gap, e := binary.ReadUvarint(dr)
-				if e != nil {
-					return stats, fmt.Errorf("%s doc gap: %w", term, e)
-				}
-				freq, e := binary.ReadUvarint(fr)
-				if e != nil {
-					return stats, e
-				}
-				if gap > math.MaxUint32-doc || i > 0 && gap == 0 || freq == 0 || freq > math.MaxUint32 {
-					return stats, fmt.Errorf("%s: invalid gap or frequency", term)
-				}
-				doc += gap
-				if doc >= numDocs || haveLast && doc <= last {
-					return stats, fmt.Errorf("%s: invalid or overlapping docID %d", term, doc)
-				}
-				if !seen[r.order] {
-					mins[r.order] = doc
-					maxs[r.order] = doc
-					seen[r.order] = true
-				} else {
-					if doc < mins[r.order] {
-						mins[r.order] = doc
-					}
-					if doc > maxs[r.order] {
-						maxs[r.order] = doc
-					}
-				}
-				encodedGap := doc
-				if count > 0 {
-					encodedGap = doc - blockLast
-				}
-				docs = binary.AppendUvarint(docs, encodedGap)
-				freqs = binary.AppendUvarint(freqs, freq)
-				count++
-				blockLast = doc
-				last = doc
-				haveLast = true
-				df++
-				stats.Postings++
-				if int(count) == blockSize {
-					if e = flush(); e != nil {
-						return stats, e
-					}
-				}
-			}
-			if doc != r.last || dr.Len() != 0 || fr.Len() != 0 {
-				return stats, fmt.Errorf("%s: run count, last_doc or block lengths inconsistent", term)
-			}
-			ok, e := r.next()
-			if e != nil {
-				return stats, e
-			}
-			if ok {
-				heap.Push(&h, r)
-			}
-		}
-		if e = flush(); e != nil {
-			return stats, e
-		}
-		if _, e = fmt.Fprintf(lw, "%s\t%d\t%d\t%d\n", term, df, termStart, nb); e != nil {
-			return stats, e
-		}
-		stats.Terms++
-	}
-	var previousMax uint64
-	previousSeen := false
-	for i := range seen {
-		if seen[i] {
-			if previousSeen && mins[i] <= previousMax {
-				return stats, fmt.Errorf("run %d overlaps earlier run document ranges", i)
-			}
-			previousMax = maxs[i]
-			previousSeen = true
+	defer output.close()
+	run_ranges := make([]runDocumentRange, len(run_readers))
+
+	// Each call consumes this term from every matching run before starting another.
+	for term_heap.Len() > 0 {
+		if err := mergeNextTerm(&term_heap, output, blockSize, document_count, run_ranges, &stats); err != nil {
+			return stats, err
 		}
 	}
-	if stats.Postings != expected {
-		return stats, fmt.Errorf("merged %d postings, metadata expects %d", stats.Postings, expected)
+	if err := validateRunRanges(run_ranges); err != nil {
+		return stats, err
 	}
-	for _, w := range []*bufio.Writer{pw, bw, lw} {
-		if e = w.Flush(); e != nil {
-			return stats, e
+	if stats.Postings != expected_postings {
+		return stats, fmt.Errorf("merged %d postings, metadata expects %d", stats.Postings, expected_postings)
+	}
+	if err := output.finish(input_path, output_path, collection_metadata, document_count, blockSize, stats); err != nil {
+		return stats, err
+	}
+	return stats, nil
+}
+
+// openRunReaders loads one term record per run and puts nonempty runs in the heap.
+func openRunReaders(run_paths []string) ([]*runReader, runHeap, error) {
+	run_readers := make([]*runReader, 0, len(run_paths))
+	var term_heap runHeap
+	for run_number, run_path := range run_paths {
+		run_reader, err := openRun(run_path, run_number)
+		if err != nil {
+			closeRunReaders(run_readers)
+			return nil, nil, err
+		}
+		run_readers = append(run_readers, run_reader)
+		has_record, err := run_reader.next()
+		if err != nil {
+			closeRunReaders(run_readers)
+			return nil, nil, fmt.Errorf("%s: %w", run_path, err)
+		}
+		if has_record {
+			heap.Push(&term_heap, run_reader)
 		}
 	}
-	// Close and check all output files before marking the index complete.
-	for _, f := range files {
-		if e = f.Close(); e != nil {
-			files = nil
-			return stats, e
+	return run_readers, term_heap, nil
+}
+
+func closeRunReaders(run_readers []*runReader) {
+	for _, run_reader := range run_readers {
+		run_reader.file.Close()
+	}
+}
+
+// indexOutput owns output files, buffered writers and absolute file positions.
+func createIndexOutput(output_path string) (*indexOutput, error) {
+	if err := os.Mkdir(output_path, 0755); err != nil {
+		return nil, err
+	}
+	output := &indexOutput{
+		postings_offset: 4, blocks_offset: 4,
+		incomplete_marker: filepath.Join(output_path, "INCOMPLETE"),
+	}
+	if err := os.WriteFile(output.incomplete_marker, []byte("merge in progress\n"), 0644); err != nil {
+		return nil, err
+	}
+	specifications := []struct {
+		name     string
+		capacity int
+		writer   **bufio.Writer
+	}{
+		{"postings.bin", 4 << 20, &output.postings_writer},
+		{"blocks.bin", 1 << 20, &output.blocks_writer},
+		{"lexicon.tsv", 1 << 20, &output.lexicon_writer},
+	}
+	for _, specification := range specifications {
+		file, err := os.Create(filepath.Join(output_path, specification.name))
+		if err != nil {
+			output.close()
+			return nil, err
+		}
+		output.files = append(output.files, file)
+		*specification.writer = bufio.NewWriterSize(file, specification.capacity)
+	}
+	if err := output.writeHeaders(); err != nil {
+		output.close()
+		return nil, err
+	}
+	return output, nil
+}
+
+func (output *indexOutput) writeHeaders() error {
+	if _, err := output.postings_writer.WriteString("FIP1"); err != nil {
+		return err
+	}
+	if _, err := output.blocks_writer.WriteString("FIB1"); err != nil {
+		return err
+	}
+	_, err := fmt.Fprintln(output.lexicon_writer, "term\tdoc_frequency\tblocks_offset\tblock_count")
+	return err
+}
+
+// close releases all remaining files, even if closing one of them fails.
+func (output *indexOutput) close() error {
+	var first_error error
+	for _, file := range output.files {
+		if err := file.Close(); err != nil && first_error == nil {
+			first_error = err
 		}
 	}
-	files = nil
-	if e = copyFile(filepath.Join(input_path, "pagetable.bin"), filepath.Join(output_path, "pagetable.bin")); e != nil {
-		return stats, e
+	output.files = nil
+	return first_error
+}
+
+// termBlocks keeps the current output block alive across input-run boundaries.
+// Only finishTerm ends a term; flushing a full block does not end it.
+type termBlocks struct {
+	output                              *indexOutput
+	block_size                          int
+	descriptor_start                    uint64
+	document_frequency, block_count     uint64
+	document_bytes, frequency_bytes     []byte
+	posting_count                       uint32
+	last_block_doc_id, last_term_doc_id uint64
+}
+
+func newTermBlocks(output *indexOutput, block_size int) *termBlocks {
+	return &termBlocks{
+		output: output, block_size: block_size, descriptor_start: output.blocks_offset,
+		document_bytes:  make([]byte, 0, block_size*3),
+		frequency_bytes: make([]byte, 0, block_size*2),
 	}
-	if e = os.WriteFile(filepath.Join(output_path, "collection-meta.txt"), meta, 0644); e != nil {
-		return stats, e
+}
+
+// appendPosting encodes one posting and writes a block when it reaches capacity.
+func (term_blocks *termBlocks) appendPosting(doc_id, frequency uint64, stats *Stats) error {
+	document_gap := doc_id // Every block restarts its gaps from zero.
+	if term_blocks.posting_count > 0 {
+		document_gap = doc_id - term_blocks.last_block_doc_id
 	}
-	finalMeta := fmt.Sprintf("format=FIP1\nnum_docs=%d\nnum_terms=%d\nnum_postings=%d\nnum_blocks=%d\nblock_size=%d\n", numDocs, stats.Terms, stats.Postings, stats.Blocks, blockSize)
-	if e = os.WriteFile(filepath.Join(output_path, "meta.txt"), []byte(finalMeta), 0644); e != nil {
-		return stats, e
+	term_blocks.document_bytes = binary.AppendUvarint(term_blocks.document_bytes, document_gap)
+	term_blocks.frequency_bytes = binary.AppendUvarint(term_blocks.frequency_bytes, frequency)
+	term_blocks.posting_count++
+	term_blocks.last_block_doc_id = doc_id
+	term_blocks.last_term_doc_id = doc_id
+	term_blocks.document_frequency++
+	stats.Postings++
+	if int(term_blocks.posting_count) == term_blocks.block_size {
+		return term_blocks.flushBlock(stats)
 	}
-	err = os.Remove(marker)
-	return stats, err
+	return nil
+}
+
+func (term_blocks *termBlocks) flushBlock(stats *Stats) error {
+	if term_blocks.posting_count == 0 {
+		return nil
+	}
+	output := term_blocks.output
+	var descriptor [24]byte
+	binary.LittleEndian.PutUint32(descriptor[0:4], uint32(term_blocks.last_block_doc_id))
+	binary.LittleEndian.PutUint32(descriptor[4:8], term_blocks.posting_count)
+	binary.LittleEndian.PutUint64(descriptor[8:16], output.postings_offset)
+	binary.LittleEndian.PutUint32(descriptor[16:20], uint32(len(term_blocks.document_bytes)))
+	binary.LittleEndian.PutUint32(descriptor[20:24], uint32(len(term_blocks.frequency_bytes)))
+	if _, err := output.blocks_writer.Write(descriptor[:]); err != nil {
+		return err
+	}
+	if _, err := output.postings_writer.Write(term_blocks.document_bytes); err != nil {
+		return err
+	}
+	if _, err := output.postings_writer.Write(term_blocks.frequency_bytes); err != nil {
+		return err
+	}
+	output.postings_offset += uint64(len(term_blocks.document_bytes) + len(term_blocks.frequency_bytes))
+	output.blocks_offset += 24
+	term_blocks.block_count++
+	stats.Blocks++
+	term_blocks.posting_count = 0
+	term_blocks.document_bytes = term_blocks.document_bytes[:0]
+	term_blocks.frequency_bytes = term_blocks.frequency_bytes[:0]
+	return nil
+}
+
+func (term_blocks *termBlocks) finishTerm(term string, stats *Stats) error {
+	if err := term_blocks.flushBlock(stats); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(term_blocks.output.lexicon_writer, "%s\t%d\t%d\t%d\n",
+		term, term_blocks.document_frequency, term_blocks.descriptor_start, term_blocks.block_count); err != nil {
+		return err
+	}
+	stats.Terms++
+	return nil
+}
+
+// mergeNextTerm gathers all records for the smallest term into consecutive blocks.
+func mergeNextTerm(term_heap *runHeap, output *indexOutput, block_size int, document_count uint64, run_ranges []runDocumentRange, stats *Stats) error {
+	term := (*term_heap)[0].term
+	term_blocks := newTermBlocks(output, block_size)
+	for term_heap.Len() > 0 && (*term_heap)[0].term == term {
+		run_reader := heap.Pop(term_heap).(*runReader)
+		if err := appendRunRecord(run_reader, term_blocks, document_count, &run_ranges[run_reader.order], stats); err != nil {
+			return err
+		}
+		// Mutate the reader's current term only while it is outside the heap.
+		has_record, err := run_reader.next()
+		if err != nil {
+			return err
+		}
+		if has_record {
+			heap.Push(term_heap, run_reader)
+		}
+	}
+	return term_blocks.finishTerm(term, stats)
+}
+
+// appendRunRecord decodes one input list, validates it, and feeds output blocks.
+func appendRunRecord(run_reader *runReader, term_blocks *termBlocks, document_count uint64, run_range *runDocumentRange, stats *Stats) error {
+	document_reader := bytes.NewReader(run_reader.docs)
+	frequency_reader := bytes.NewReader(run_reader.freqs)
+	var doc_id uint64
+	for posting_number := uint64(0); posting_number < run_reader.count; posting_number++ {
+		document_gap, err := binary.ReadUvarint(document_reader)
+		if err != nil {
+			return fmt.Errorf("%s doc gap: %w", run_reader.term, err)
+		}
+		frequency, err := binary.ReadUvarint(frequency_reader)
+		if err != nil {
+			return err
+		}
+		if document_gap > math.MaxUint32-doc_id || posting_number > 0 && document_gap == 0 || frequency == 0 || frequency > math.MaxUint32 {
+			return fmt.Errorf("%s: invalid gap or frequency", run_reader.term)
+		}
+		doc_id += document_gap
+		if doc_id >= document_count || term_blocks.document_frequency > 0 && doc_id <= term_blocks.last_term_doc_id {
+			return fmt.Errorf("%s: invalid or overlapping docID %d", run_reader.term, doc_id)
+		}
+		run_range.record(doc_id)
+		if err := term_blocks.appendPosting(doc_id, frequency, stats); err != nil {
+			return err
+		}
+	}
+	if doc_id != run_reader.last || document_reader.Len() != 0 || frequency_reader.Len() != 0 {
+		return fmt.Errorf("%s: run count, last_doc or block lengths inconsistent", run_reader.term)
+	}
+	return nil
+}
+
+// runDocumentRange tracks IDs across all terms, including terms absent elsewhere.
+func (run_range *runDocumentRange) record(doc_id uint64) {
+	if !run_range.has_postings {
+		run_range.min_doc_id, run_range.max_doc_id = doc_id, doc_id
+		run_range.has_postings = true
+		return
+	}
+	if doc_id < run_range.min_doc_id {
+		run_range.min_doc_id = doc_id
+	}
+	if doc_id > run_range.max_doc_id {
+		run_range.max_doc_id = doc_id
+	}
+}
+
+func validateRunRanges(run_ranges []runDocumentRange) error {
+	var previous_max_doc_id uint64
+	previous_run_has_postings := false
+	for run_number, run_range := range run_ranges {
+		if !run_range.has_postings {
+			continue
+		}
+		if previous_run_has_postings && run_range.min_doc_id <= previous_max_doc_id {
+			return fmt.Errorf("run %d overlaps earlier run document ranges", run_number)
+		}
+		previous_max_doc_id = run_range.max_doc_id
+		previous_run_has_postings = true
+	}
+	return nil
+}
+
+// finish flushes and closes the index before publishing its metadata and marker.
+func (output *indexOutput) finish(input_path, output_path string, collection_metadata []byte, document_count uint64, block_size int, stats Stats) error {
+	for _, writer := range []*bufio.Writer{output.postings_writer, output.blocks_writer, output.lexicon_writer} {
+		if err := writer.Flush(); err != nil {
+			return err
+		}
+	}
+	if err := output.close(); err != nil {
+		return err
+	}
+	if err := copyFile(filepath.Join(input_path, "pagetable.bin"), filepath.Join(output_path, "pagetable.bin")); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(output_path, "collection-meta.txt"), collection_metadata, 0644); err != nil {
+		return err
+	}
+	final_metadata := fmt.Sprintf("format=FIP1\nnum_docs=%d\nnum_terms=%d\nnum_postings=%d\nnum_blocks=%d\nblock_size=%d\n",
+		document_count, stats.Terms, stats.Postings, stats.Blocks, block_size)
+	if err := os.WriteFile(filepath.Join(output_path, "meta.txt"), []byte(final_metadata), 0644); err != nil {
+		return err
+	}
+	return os.Remove(output.incomplete_marker)
 }
 
 func copyFile(src, dst string) (err error) {
