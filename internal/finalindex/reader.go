@@ -92,12 +92,6 @@ func (r *Reader) Close() error {
 	return first
 }
 
-type block struct {
-	last, count uint32
-	offset      uint64
-	docs, freqs uint32
-}
-
 // BlockDescriptor locates one compressed posting block and describes its contents.
 type BlockDescriptor struct {
 	LastDocID, PostingCount uint32
@@ -134,14 +128,11 @@ func (r *Reader) BlockDescriptors(entry Entry) ([]BlockDescriptor, error) {
 		if err != nil {
 			return nil, fmt.Errorf("block %d: %w", index, err)
 		}
-		if index > 0 && decoded.last <= descriptors[index-1].LastDocID {
+		if index > 0 && decoded.LastDocID <= descriptors[index-1].LastDocID {
 			return nil, fmt.Errorf("block docIDs are not increasing")
 		}
-		descriptors[index] = BlockDescriptor{
-			LastDocID: decoded.last, PostingCount: decoded.count,
-			PayloadOffset: decoded.offset, DocumentBytes: decoded.docs, FrequencyBytes: decoded.freqs,
-		}
-		posting_count += uint64(decoded.count)
+		descriptors[index] = decoded
+		posting_count += uint64(decoded.PostingCount)
 	}
 	if posting_count != entry.DocFrequency {
 		return nil, fmt.Errorf("block posting count does not match lexicon document frequency")
@@ -149,23 +140,22 @@ func (r *Reader) BlockDescriptors(entry Entry) ([]BlockDescriptor, error) {
 	return descriptors, nil
 }
 
-func (r *Reader) block(e Entry, i uint64) (b block, err error) {
-	if e.BlocksOffset > math.MaxInt64 || i >= e.BlockCount || i > (math.MaxInt64-e.BlocksOffset)/24 {
-		return b, fmt.Errorf("invalid block index")
+func decodeBlockDescriptor(header []byte) (BlockDescriptor, error) {
+	descriptor := BlockDescriptor{
+		LastDocID:      binary.LittleEndian.Uint32(header[0:4]),
+		PostingCount:   binary.LittleEndian.Uint32(header[4:8]),
+		PayloadOffset:  binary.LittleEndian.Uint64(header[8:16]),
+		DocumentBytes:  binary.LittleEndian.Uint32(header[16:20]),
+		FrequencyBytes: binary.LittleEndian.Uint32(header[20:24]),
 	}
-	var h [24]byte
-	if _, err = r.blocks.ReadAt(h[:], int64(e.BlocksOffset+i*24)); err != nil {
-		return b, err
+	posting_count := uint64(descriptor.PostingCount)
+	if posting_count == 0 || posting_count > 65536 ||
+		uint64(descriptor.DocumentBytes) < posting_count || uint64(descriptor.DocumentBytes) > 5*posting_count ||
+		uint64(descriptor.FrequencyBytes) < posting_count || uint64(descriptor.FrequencyBytes) > 5*posting_count ||
+		descriptor.PayloadOffset > math.MaxInt64 {
+		return descriptor, fmt.Errorf("invalid block descriptor")
 	}
-	return decodeBlockDescriptor(h[:])
-}
-
-func decodeBlockDescriptor(h []byte) (b block, err error) {
-	b = block{binary.LittleEndian.Uint32(h[0:4]), binary.LittleEndian.Uint32(h[4:8]), binary.LittleEndian.Uint64(h[8:16]), binary.LittleEndian.Uint32(h[16:20]), binary.LittleEndian.Uint32(h[20:24])}
-	if b.count == 0 || b.count > 65536 || b.docs < b.count || uint64(b.docs) > 5*uint64(b.count) || b.freqs < b.count || uint64(b.freqs) > 5*uint64(b.count) || b.offset > math.MaxInt64 {
-		return b, fmt.Errorf("invalid block descriptor")
-	}
-	return b, nil
+	return descriptor, nil
 }
 
 type Posting struct{ DocID, Frequency uint32 }
@@ -207,45 +197,6 @@ func (r *Reader) ReadPostingBlock(descriptor BlockDescriptor) ([]Posting, error)
 		return nil, fmt.Errorf("inconsistent posting block")
 	}
 	return postings, nil
-}
-
-// SeekGE returns the first posting whose docID is >= target, or ok=false.
-// It binary-searches block maxima and decodes at most one posting block.
-func (r *Reader) SeekGE(e Entry, target uint32) (p Posting, ok bool, err error) {
-	lo, hi := uint64(0), e.BlockCount
-	for lo < hi {
-		mid := lo + (hi-lo)/2
-		b, er := r.block(e, mid)
-		if er != nil {
-			return p, false, er
-		}
-		if b.last < target {
-			lo = mid + 1
-		} else {
-			hi = mid
-		}
-	}
-	if lo == e.BlockCount {
-		return p, false, nil
-	}
-	b, err := r.block(e, lo)
-	if err != nil {
-		return p, false, err
-	}
-	postings, err := r.ReadPostingBlock(BlockDescriptor{
-		LastDocID: b.last, PostingCount: b.count, PayloadOffset: b.offset,
-		DocumentBytes: b.docs, FrequencyBytes: b.freqs,
-	})
-	if err != nil {
-		return p, false, err
-	}
-	for _, posting := range postings {
-		if posting.DocID >= target {
-			return posting, true, nil
-		}
-	}
-
-	return p, ok, nil
 }
 
 // Document is the original Rust 16-byte page-table record.
