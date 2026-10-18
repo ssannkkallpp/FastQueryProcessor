@@ -18,24 +18,28 @@ type Entry struct {
 	DocFrequency, BlocksOffset, BlockCount uint64
 }
 
+// Parse a given line of the lexicon.tsv file
 func ParseEntry(line string) (Entry, error) {
 	fields := strings.Split(line, "\t")
 	if len(fields) != 4 {
 		return Entry{}, fmt.Errorf("expected four lexicon columns")
 	}
-	e := Entry{Term: fields[0]}
+
+	lexicon_entry := Entry{Term: fields[0]}
 	var err error
-	dst := []*uint64{&e.DocFrequency, &e.BlocksOffset, &e.BlockCount}
+	dst := []*uint64{&lexicon_entry.DocFrequency, &lexicon_entry.BlocksOffset, &lexicon_entry.BlockCount}
 	for i, p := range dst {
 		*p, err = strconv.ParseUint(fields[i+1], 10, 64)
 		if err != nil {
 			return Entry{}, err
 		}
 	}
-	if e.DocFrequency == 0 || e.BlockCount == 0 || e.BlocksOffset < 4 || e.BlocksOffset%24 != 4 {
+
+	if lexicon_entry.DocFrequency == 0 || lexicon_entry.BlockCount == 0 || lexicon_entry.BlocksOffset < 4 || lexicon_entry.BlocksOffset%24 != 4 {
 		return Entry{}, fmt.Errorf("invalid lexicon entry")
 	}
-	return e, nil
+
+	return lexicon_entry, nil
 }
 
 // Reader supports block selection and fixed-position document-table lookup.
@@ -75,6 +79,7 @@ func Open(dir string) (r *Reader, err error) {
 	}
 	return r, nil
 }
+
 func (r *Reader) Close() error {
 	var first error
 	for _, f := range []*os.File{r.posts, r.blocks, r.pages} {
@@ -93,6 +98,57 @@ type block struct {
 	docs, freqs uint32
 }
 
+// BlockDescriptor locates one compressed posting block and describes its contents.
+type BlockDescriptor struct {
+	LastDocID, PostingCount uint32
+	PayloadOffset           uint64
+	DocumentBytes           uint32
+	FrequencyBytes          uint32
+}
+
+// BlockDescriptors reads only this term's consecutive descriptors in one read.
+// It does not read or decompress any posting payloads.
+func (r *Reader) BlockDescriptors(entry Entry) ([]BlockDescriptor, error) {
+	if entry.BlocksOffset < 4 || entry.BlocksOffset%24 != 4 ||
+		entry.BlocksOffset > math.MaxInt64 || entry.BlockCount == 0 ||
+		entry.BlockCount > uint64(math.MaxInt)/24 ||
+		entry.BlockCount > (math.MaxInt64-entry.BlocksOffset)/24 {
+		return nil, fmt.Errorf("invalid block descriptor range")
+	}
+	byte_length := entry.BlockCount * 24
+	file_info, err := r.blocks.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if entry.BlocksOffset+byte_length > uint64(file_info.Size()) {
+		return nil, fmt.Errorf("block descriptor range exceeds file size")
+	}
+	encoded := make([]byte, int(byte_length))
+	if _, err := r.blocks.ReadAt(encoded, int64(entry.BlocksOffset)); err != nil {
+		return nil, err
+	}
+	descriptors := make([]BlockDescriptor, int(entry.BlockCount))
+	var posting_count uint64
+	for index := range descriptors {
+		decoded, err := decodeBlockDescriptor(encoded[index*24 : (index+1)*24])
+		if err != nil {
+			return nil, fmt.Errorf("block %d: %w", index, err)
+		}
+		if index > 0 && decoded.last <= descriptors[index-1].LastDocID {
+			return nil, fmt.Errorf("block docIDs are not increasing")
+		}
+		descriptors[index] = BlockDescriptor{
+			LastDocID: decoded.last, PostingCount: decoded.count,
+			PayloadOffset: decoded.offset, DocumentBytes: decoded.docs, FrequencyBytes: decoded.freqs,
+		}
+		posting_count += uint64(decoded.count)
+	}
+	if posting_count != entry.DocFrequency {
+		return nil, fmt.Errorf("block posting count does not match lexicon document frequency")
+	}
+	return descriptors, nil
+}
+
 func (r *Reader) block(e Entry, i uint64) (b block, err error) {
 	if e.BlocksOffset > math.MaxInt64 || i >= e.BlockCount || i > (math.MaxInt64-e.BlocksOffset)/24 {
 		return b, fmt.Errorf("invalid block index")
@@ -101,6 +157,10 @@ func (r *Reader) block(e Entry, i uint64) (b block, err error) {
 	if _, err = r.blocks.ReadAt(h[:], int64(e.BlocksOffset+i*24)); err != nil {
 		return b, err
 	}
+	return decodeBlockDescriptor(h[:])
+}
+
+func decodeBlockDescriptor(h []byte) (b block, err error) {
 	b = block{binary.LittleEndian.Uint32(h[0:4]), binary.LittleEndian.Uint32(h[4:8]), binary.LittleEndian.Uint64(h[8:16]), binary.LittleEndian.Uint32(h[16:20]), binary.LittleEndian.Uint32(h[20:24])}
 	if b.count == 0 || b.count > 65536 || b.docs < b.count || uint64(b.docs) > 5*uint64(b.count) || b.freqs < b.count || uint64(b.freqs) > 5*uint64(b.count) || b.offset > math.MaxInt64 {
 		return b, fmt.Errorf("invalid block descriptor")
@@ -109,6 +169,45 @@ func (r *Reader) block(e Entry, i uint64) (b block, err error) {
 }
 
 type Posting struct{ DocID, Frequency uint32 }
+
+// ReadPostingBlock loads and decodes one descriptor's payload from postings.bin.
+func (r *Reader) ReadPostingBlock(descriptor BlockDescriptor) ([]Posting, error) {
+	count := uint64(descriptor.PostingCount)
+	document_bytes, frequency_bytes := uint64(descriptor.DocumentBytes), uint64(descriptor.FrequencyBytes)
+	payload_bytes := document_bytes + frequency_bytes
+	if count == 0 || count > 65536 || document_bytes < count || document_bytes > 5*count ||
+		frequency_bytes < count || frequency_bytes > 5*count || descriptor.PayloadOffset < 4 ||
+		descriptor.PayloadOffset > math.MaxInt64-payload_bytes {
+		return nil, fmt.Errorf("invalid posting block descriptor")
+	}
+	payload := make([]byte, int(payload_bytes))
+	if _, err := r.posts.ReadAt(payload, int64(descriptor.PayloadOffset)); err != nil {
+		return nil, err
+	}
+	document_reader := bytes.NewReader(payload[:descriptor.DocumentBytes])
+	frequency_reader := bytes.NewReader(payload[descriptor.DocumentBytes:])
+	postings := make([]Posting, 0, descriptor.PostingCount)
+	var doc_id uint64
+	for index := uint32(0); index < descriptor.PostingCount; index++ {
+		gap, err := binary.ReadUvarint(document_reader)
+		if err != nil {
+			return nil, err
+		}
+		frequency, err := binary.ReadUvarint(frequency_reader)
+		if err != nil {
+			return nil, err
+		}
+		if gap > math.MaxUint32-doc_id || index > 0 && gap == 0 || frequency == 0 || frequency > math.MaxUint32 {
+			return nil, fmt.Errorf("invalid block posting")
+		}
+		doc_id += gap
+		postings = append(postings, Posting{DocID: uint32(doc_id), Frequency: uint32(frequency)})
+	}
+	if doc_id != uint64(descriptor.LastDocID) || document_reader.Len() != 0 || frequency_reader.Len() != 0 {
+		return nil, fmt.Errorf("inconsistent posting block")
+	}
+	return postings, nil
+}
 
 // SeekGE returns the first posting whose docID is >= target, or ok=false.
 // It binary-searches block maxima and decodes at most one posting block.
@@ -133,33 +232,19 @@ func (r *Reader) SeekGE(e Entry, target uint32) (p Posting, ok bool, err error) 
 	if err != nil {
 		return p, false, err
 	}
-	payload := make([]byte, int(b.docs)+int(b.freqs))
-	if _, err = r.posts.ReadAt(payload, int64(b.offset)); err != nil {
+	postings, err := r.ReadPostingBlock(BlockDescriptor{
+		LastDocID: b.last, PostingCount: b.count, PayloadOffset: b.offset,
+		DocumentBytes: b.docs, FrequencyBytes: b.freqs,
+	})
+	if err != nil {
 		return p, false, err
 	}
-	dr, fr := bytes.NewReader(payload[:b.docs]), bytes.NewReader(payload[b.docs:])
-	var doc uint64
-	for i := uint32(0); i < b.count; i++ {
-		gap, er := binary.ReadUvarint(dr)
-		if er != nil {
-			return p, false, er
-		}
-		freq, er := binary.ReadUvarint(fr)
-		if er != nil {
-			return p, false, er
-		}
-		if gap > math.MaxUint32-doc || i > 0 && gap == 0 || freq == 0 || freq > math.MaxUint32 {
-			return p, false, fmt.Errorf("invalid block posting")
-		}
-		doc += gap
-		if !ok && doc >= uint64(target) {
-			p = Posting{uint32(doc), uint32(freq)}
-			ok = true
+	for _, posting := range postings {
+		if posting.DocID >= target {
+			return posting, true, nil
 		}
 	}
-	if doc != uint64(b.last) || dr.Len() != 0 || fr.Len() != 0 {
-		return p, false, fmt.Errorf("inconsistent posting block")
-	}
+
 	return p, ok, nil
 }
 

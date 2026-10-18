@@ -16,6 +16,7 @@ import (
 	"strings"
 )
 
+// runReader reads one sorted input run and holds its current term and compressed postings.
 type runReader struct {
 	file           *os.File
 	reader         *bufio.Reader
@@ -26,6 +27,7 @@ type runReader struct {
 	order          int
 }
 
+// indexOutput manages the final index files, buffered writers, and byte offsets.
 type indexOutput struct {
 	files                                          []*os.File
 	postings_writer, blocks_writer, lexicon_writer *bufio.Writer
@@ -33,9 +35,27 @@ type indexOutput struct {
 	incomplete_marker                              string
 }
 
+// runDocumentRange tracks the smallest and largest docIDs seen in one input run.
 type runDocumentRange struct {
 	min_doc_id, max_doc_id uint64
 	has_postings           bool
+}
+
+// runHeap selects the reader with the smallest current term, breaking ties by run number.
+type runHeap []*runReader
+
+// Stats counts the distinct terms, postings, and blocks written by the merger.
+type Stats struct{ Terms, Postings, Blocks uint64 }
+
+// termBlocks builds consecutive output blocks for one term across all contributing runs.
+type termBlocks struct {
+	output                              *indexOutput
+	block_size                          int
+	descriptor_start                    uint64
+	document_frequency, block_count     uint64
+	document_bytes, frequency_bytes     []byte
+	posting_count                       uint32
+	last_block_doc_id, last_term_doc_id uint64
 }
 
 func openRun(filepath string, order int) (*runReader, error) {
@@ -61,6 +81,7 @@ func openRun(filepath string, order int) (*runReader, error) {
 
 func (r *runReader) next() (bool, error) {
 	if r.remaining == 0 {
+		// Validate the end of the file
 		_, e := r.reader.Peek(1)
 		if e == io.EOF {
 			return false, nil
@@ -70,14 +91,16 @@ func (r *runReader) next() (bool, error) {
 		}
 		return false, fmt.Errorf("trailing run bytes")
 	}
-	n, e := binary.ReadUvarint(r.reader)
+
+	term_length, e := binary.ReadUvarint(r.reader)
 	if e != nil {
 		return false, e
 	}
-	if n == 0 || n > 64 {
-		return false, fmt.Errorf("invalid term length %d", n)
+	if term_length == 0 || term_length > 64 {
+		return false, fmt.Errorf("invalid term length %d", term_length)
 	}
-	t := make([]byte, int(n))
+
+	t := make([]byte, int(term_length))
 	if _, e = io.ReadFull(r.reader, t); e != nil {
 		return false, e
 	}
@@ -86,6 +109,7 @@ func (r *runReader) next() (bool, error) {
 			return false, fmt.Errorf("invalid term bytes")
 		}
 	}
+
 	r.term = string(t)
 	if r.previous != "" && r.term <= r.previous {
 		return false, fmt.Errorf("terms out of order")
@@ -98,6 +122,7 @@ func (r *runReader) next() (bool, error) {
 			return false, e
 		}
 	}
+
 	r.count, r.last = values[0], values[1]
 	if r.count == 0 || r.count > math.MaxUint32 || r.last > math.MaxUint32 {
 		return false, fmt.Errorf("invalid posting count or last docID")
@@ -132,8 +157,6 @@ func resize(b []byte, n int) []byte {
 	return b[:n]
 }
 
-type runHeap []*runReader
-
 func (h runHeap) Len() int { return len(h) }
 func (h runHeap) Less(i, j int) bool {
 	if h[i].term == h[j].term {
@@ -144,9 +167,6 @@ func (h runHeap) Less(i, j int) bool {
 func (h runHeap) Swap(i, j int) { h[i], h[j] = h[j], h[i] }
 func (h *runHeap) Push(v any)   { *h = append(*h, v.(*runReader)) }
 func (h *runHeap) Pop() any     { a := *h; v := a[len(a)-1]; *h = a[:len(a)-1]; return v }
-
-// Stats describes a completed merge.
-type Stats struct{ Terms, Postings, Blocks uint64 }
 
 // validate_metadata checks configuration and parser outputs before merging.
 func validate_metadata(input_path string, blockSize int) (meta []byte, numDocs, expected uint64, paths []string, err error) {
@@ -240,6 +260,7 @@ func openRunReaders(run_paths []string) ([]*runReader, runHeap, error) {
 	for run_number, run_path := range run_paths {
 		run_reader, err := openRun(run_path, run_number)
 		if err != nil {
+			// Fail fully on any failures
 			closeRunReaders(run_readers)
 			return nil, nil, err
 		}
@@ -262,7 +283,7 @@ func closeRunReaders(run_readers []*runReader) {
 	}
 }
 
-// indexOutput owns output files, buffered writers and absolute file positions.
+// createIndexOutput creates the output directory, files, and format headers.
 func createIndexOutput(output_path string) (*indexOutput, error) {
 	if err := os.Mkdir(output_path, 0755); err != nil {
 		return nil, err
@@ -320,18 +341,6 @@ func (output *indexOutput) close() error {
 	}
 	output.files = nil
 	return first_error
-}
-
-// termBlocks keeps the current output block alive across input-run boundaries.
-// Only finishTerm ends a term; flushing a full block does not end it.
-type termBlocks struct {
-	output                              *indexOutput
-	block_size                          int
-	descriptor_start                    uint64
-	document_frequency, block_count     uint64
-	document_bytes, frequency_bytes     []byte
-	posting_count                       uint32
-	last_block_doc_id, last_term_doc_id uint64
 }
 
 func newTermBlocks(output *indexOutput, block_size int) *termBlocks {
@@ -412,11 +421,12 @@ func mergeNextTerm(term_heap *runHeap, output *indexOutput, block_size int, docu
 		if err := appendRunRecord(run_reader, term_blocks, document_count, &run_ranges[run_reader.order], stats); err != nil {
 			return err
 		}
-		// Mutate the reader's current term only while it is outside the heap.
+		// Mutate the reader's current term while it is outside the heap.
 		has_record, err := run_reader.next()
 		if err != nil {
 			return err
 		}
+		// If the run still has more terms, push those to the heap
 		if has_record {
 			heap.Push(term_heap, run_reader)
 		}
@@ -456,7 +466,7 @@ func appendRunRecord(run_reader *runReader, term_blocks *termBlocks, document_co
 	return nil
 }
 
-// runDocumentRange tracks IDs across all terms, including terms absent elsewhere.
+// record updates the range with a docID from any term in this run.
 func (run_range *runDocumentRange) record(doc_id uint64) {
 	if !run_range.has_postings {
 		run_range.min_doc_id, run_range.max_doc_id = doc_id, doc_id

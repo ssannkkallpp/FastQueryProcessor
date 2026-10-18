@@ -85,6 +85,39 @@ func TestMergeAndSeek(t *testing.T) {
 		}
 		entries[e.Term] = e
 	}
+	descriptors, err := r.BlockDescriptors(entries["cat"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	want_descriptors := []BlockDescriptor{
+		{LastDocID: 127, PostingCount: 2, PayloadOffset: 6, DocumentBytes: 2, FrequencyBytes: 3},
+		{LastDocID: 300, PostingCount: 2, PayloadOffset: 11, DocumentBytes: 4, FrequencyBytes: 2},
+	}
+	if !reflect.DeepEqual(descriptors, want_descriptors) {
+		t.Fatalf("descriptors: got %+v, want %+v", descriptors, want_descriptors)
+	}
+	want_blocks := [][]Posting{{{0, 1}, {127, 300}}, {{128, 2}, {300, 4}}}
+	for index, descriptor := range descriptors {
+		postings, err := r.ReadPostingBlock(descriptor)
+		if err != nil || !reflect.DeepEqual(postings, want_blocks[index]) {
+			t.Fatalf("block %d: got %+v, error %v", index, postings, err)
+		}
+	}
+	invalid_descriptor := descriptors[0]
+	invalid_descriptor.PostingCount = 0
+	if _, err := r.ReadPostingBlock(invalid_descriptor); err == nil {
+		t.Fatal("expected invalid posting block error")
+	}
+	invalid_entry := entries["cat"]
+	invalid_entry.BlockCount = ^uint64(0)
+	if _, err := r.BlockDescriptors(invalid_entry); err == nil {
+		t.Fatal("expected invalid descriptor range error")
+	}
+	invalid_entry = entries["cat"]
+	invalid_entry.DocFrequency++
+	if _, err := r.BlockDescriptors(invalid_entry); err == nil {
+		t.Fatal("expected descriptor count mismatch error")
+	}
 	for _, tc := range []struct {
 		target uint32
 		want   Posting
