@@ -101,3 +101,36 @@ The page table uses fixed 16-byte records, so record *d* sits at byte
 - `len` (u32), the number of terms, used by BM25
 - `offset` (u64), the byte position of the passage in the collection file,
   so snippets can be fetched later
+
+## Merge the Rust runs with Go
+
+```sh
+go run ./cmd/merge -input data/rust-full-run -dir data/final-index
+# Build a standalone executable:
+go build -o /tmp/merge-index ./cmd/merge
+# Tests for the merger and query primitives:
+go test ./cmd/... ./internal/...
+```
+
+The output directory must be new. The default block size is 128 postings;
+change it with `-block-size N`. The merger writes varbyte-compressed posting
+blocks, a binary block directory for docID skipping, a TSV lexicon, and a copy
+of the Rust document table for docID-to-PID lookup. See
+[the final index format](internal/finalindex/FORMAT.md) for the byte layout
+and the `SeekGE`/`Document` reader APIs.
+
+## Query CLI and package layout
+
+```sh
+go run ./cmd/query
+```
+
+- `cmd/query/main.go`: CLI input, startup wiring, and result printing.
+- `internal/query/query.go`: `Evaluate` entry point, term preparation, and PID resolution.
+- `internal/query/evaluation.go`: posting iterators, AND/OR DAAT evaluation,
+  the top-ten heap, and the BM25 scoring placeholder.
+- `internal/finalindex/lexicon.go`: `LoadLexicon`, called once at startup.
+- `internal/finalindex/reader.go`: binary index reads and decompression.
+
+BM25 scores are still placeholders; query tokenization currently lowercases
+and splits on whitespace. The existing compressed index format is unchanged.
