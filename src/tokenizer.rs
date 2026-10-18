@@ -1,21 +1,26 @@
 //! Tokenization: raw passage bytes -> lowercase terms.
 //!
-//! * ASCII letters and digits form terms; letters are lowercased.
-//! * Every other ASCII byte (space, punctuation, symbols, control chars) is a
-//!   separator, so "don't" -> ["don", "t"] and "e-mail" -> ["e", "mail"].
+//! * Terms are delimited by whitespace only (space, tab, newline, ...; other
+//!   invisible ASCII control characters are treated the same way).
+//! * Inside a term, ASCII letters and digits are kept and letters lowercased.
+//!   Punctuation and symbols are removed rather than splitting the term, so
+//!   "don't" -> "dont", "e-mail" -> "email", "U.S." -> "us", "2.3%" -> "23".
+//!   A token made only of punctuation (e.g. "--") produces no term.
 //! * A token containing any non-ASCII byte (>= 0x80) is dropped whole. This
 //!   "just ignores" text in other scripts, as the assignment allows, without
 //!   leaving junk fragments behind ("café" is dropped, not indexed as "caf"),
 //!   and works on arbitrary bytes, so malformed UTF-8 can never cause a failure.
-//! * Tokens longer than [`MAX_TERM_LEN`] bytes are dropped.
+//! * Terms longer than [`MAX_TERM_LEN`] bytes (after removing punctuation)
+//!   are dropped.
 //!
 //! No stemming and no stopword removal: every remaining term is indexed.
+//! Works directly on bytes, with no UTF-8 decoding and no allocation.
 
-/// Longest term (in bytes) that is indexed; longer tokens are dropped.
 pub const MAX_TERM_LEN: usize = 64;
 
 const SEP: u8 = 0; // separator byte
 const BAD: u8 = 1; // non-ASCII byte: poisons the current token
+const SKIP: u8 = 2; // punctuation or symbol: removed, token continues
 
 /// Byte class table: SEP, BAD, or the lowercased term character.
 const CLASS: [u8; 256] = {
@@ -27,7 +32,8 @@ const CLASS: [u8; 256] = {
             b'a'..=b'z' | b'0'..=b'9' => b,
             b'A'..=b'Z' => b + (b'a' - b'A'),
             0x80..=0xff => BAD,
-            _ => SEP,
+            0x00..=0x20 | 0x7f => SEP,  // space and control characters (\t \n \r ...)
+            _ => SKIP,                  // printable punctuation: ! " # ' - . / : @ [ ` { ~ ...
         };
         c += 1;
     }
@@ -65,6 +71,7 @@ impl Tokenizer {
                     len = 0;
                     bad = false;
                 }
+                SKIP => {}
                 BAD => bad = true,
                 lc => {
                     if len < MAX_TERM_LEN {

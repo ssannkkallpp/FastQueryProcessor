@@ -24,8 +24,6 @@ cargo test --release
 | `--show` | off | print every posting (term, docID, freq) |
 | `--ascii` | off | write runs as `.tsv` text instead of binary |
 
-Flags also work with a single dash (`-input`), like the Go version.
-
 Output:
 
 ```
@@ -69,15 +67,18 @@ concatenating that term's records from run 0, 1, 2, ... It only needs a k-way
 merge on terms and never has to re-sort docIDs.
 
 ### Tokenization (`src/tokenizer.rs`)
-
-The rules are identical to the Go reference, and the query processor will
-reuse the same function:
-
-- ASCII letters and digits form terms, and letters are lowercased.
-- Every other ASCII byte is a separator, so `don't` becomes `don`, `t`.
+ 
+The query processor will reuse the same function:
+ 
+- Terms are delimited by whitespace only (space, tab, newline; other ASCII
+  control characters count as whitespace too).
+- Within a term, ASCII letters and digits are kept and letters are lowercased.
+  Punctuation is removed instead of splitting the term, so `don't` becomes
+  `dont`, `e-mail` becomes `email`, and `U.S.` becomes `us`. A token made only
+  of punctuation, such as `--`, produces no term.
 - A token containing any non-ASCII byte is dropped whole. This ignores
   foreign-language text and never fails on malformed UTF-8.
-- Tokens longer than 64 bytes are dropped.
+- Terms longer than 64 bytes (after removing punctuation) are dropped.
 - There is no stemming and no stopword removal.
 
 ### Run file format (`src/runfile.rs`)
