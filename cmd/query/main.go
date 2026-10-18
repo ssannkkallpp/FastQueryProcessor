@@ -26,6 +26,10 @@ func run() error {
 		return err
 	}
 	defer index_reader.Close()
+	statistics, err := finalindex.LoadCollectionStats("data/final-index/collection-meta.txt")
+	if err != nil {
+		return err
+	}
 
 	input := bufio.NewScanner(os.Stdin)
 	input.Buffer(make([]byte, 4096), 1<<20)
@@ -64,15 +68,15 @@ func run() error {
 			fmt.Println("Please enter conjunctive or disjunctive.")
 		}
 
-		if err := processQuery(query, mode, lexicon, index_reader); err != nil {
+		if err := processQuery(query, mode, lexicon, index_reader, statistics); err != nil {
 			return err
 		}
 	}
 }
 
 // Process the given query and print only the final results.
-func processQuery(query_text, mode string, lexicon map[string]finalindex.Entry, index_reader *finalindex.Reader) error {
-	results, err := queryengine.Evaluate(query_text, mode, lexicon, index_reader)
+func processQuery(query_text, mode string, lexicon map[string]finalindex.Entry, index_reader *finalindex.Reader, statistics finalindex.CollectionStats) error {
+	results, err := queryengine.Evaluate(query_text, mode, lexicon, index_reader, statistics)
 	if err != nil {
 		return err
 	}
@@ -82,7 +86,6 @@ func processQuery(query_text, mode string, lexicon map[string]finalindex.Entry, 
 
 // printQueryOutput formats only final results; all index reads happen beforehand.
 func printQueryOutput(results []queryengine.Result) {
-	fmt.Println("Scores are placeholders until bm5_rank is implemented.")
 	if len(results) == 0 {
 		fmt.Println("No results.")
 		return
