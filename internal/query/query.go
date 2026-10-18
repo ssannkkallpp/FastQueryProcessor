@@ -8,7 +8,7 @@ import (
 )
 
 // Evaluate returns the top ten results for an AND or OR query without printing.
-func Evaluate(query, mode string, lexicon map[string]finalindex.Entry, index_reader *finalindex.Reader) ([]Result, error) {
+func Evaluate(query, mode string, lexicon map[string]finalindex.Entry, index_reader *finalindex.Reader, statistics finalindex.CollectionStats) ([]Result, error) {
 	if mode != "conjunctive" && mode != "disjunctive" {
 		return nil, fmt.Errorf("unknown query mode %q", mode)
 	}
@@ -17,15 +17,19 @@ func Evaluate(query, mode string, lexicon map[string]finalindex.Entry, index_rea
 		return nil, err
 	}
 
+	rank := func(doc_id uint32, matching_terms []queryTerm) (float64, error) {
+		return bm25Score(doc_id, matching_terms, index_reader, statistics)
+	}
+
 	var results []Result
 	if mode == "conjunctive" {
 		if missing_term || len(query_terms) == 0 {
 			return nil, nil
 		}
-		results, err = conjunctiveResults(query_terms, index_reader, bm5_rank)
+		results, err = conjunctiveResults(query_terms, index_reader, rank)
 	} else if mode == "disjunctive" {
 		// Missing terms contribute zero; process every term that exists.
-		results, err = disjunctiveResults(query_terms, index_reader, bm5_rank)
+		results, err = disjunctiveResults(query_terms, index_reader, rank)
 	}
 	if err != nil {
 		return nil, err

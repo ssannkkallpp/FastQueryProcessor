@@ -3,9 +3,18 @@ package query
 import (
 	"container/heap"
 	"fmt"
+	"math"
 	"searchindex/internal/finalindex"
 	"sort"
 )
+
+const K1 = 1.2
+const B = 0.75
+
+// documentReader retrieves one candidate's length without loading the page table.
+type documentReader interface {
+	Document(uint32) (finalindex.Document, error)
+}
 
 // postingBlockReader allows iterators to load just one block at a time.
 type postingBlockReader interface {
@@ -103,7 +112,7 @@ func (term *queryTerm) Advance(reader postingBlockReader, target uint32) error {
 }
 
 // conjunctiveResults aligns all lists, scores each intersection once, and keeps ten.
-func conjunctiveResults(query_terms []queryTerm, reader postingBlockReader, rank func(uint32, []queryTerm) float64) ([]Result, error) {
+func conjunctiveResults(query_terms []queryTerm, reader postingBlockReader, rank func(uint32, []queryTerm) (float64, error)) ([]Result, error) {
 	var query_results resultHeap
 	if len(query_terms) == 0 {
 		return nil, nil
@@ -130,7 +139,13 @@ func conjunctiveResults(query_terms []queryTerm, reader postingBlockReader, rank
 		if !documents_aligned {
 			continue
 		}
-		result := Result{DocID: candidate_doc_id, Score: rank(candidate_doc_id, query_terms)}
+
+		score, err := rank(candidate_doc_id, query_terms)
+		if err != nil {
+			return nil, err
+		}
+
+		result := Result{DocID: candidate_doc_id, Score: score}
 		retainResult(&query_results, result)
 		// Move every list beyond this match, stopping as soon as one is exhausted.
 		for index := range query_terms {
@@ -166,14 +181,8 @@ func sortedResults(results resultHeap) []Result {
 	return []Result(results)
 }
 
-// bm5_rank is a scoring placeholder; query_terms contains only terms matching doc_id.
-// TODO: Implement BM25 using frequencies, document lengths and collection statistics.
-func bm5_rank(doc_id uint32, query_terms []queryTerm) float64 {
-	return float64(0.0) // Return dummy for now
-}
-
 // Process the smallest current docID, scoring it once using only matching terms.
-func disjunctiveResults(query_terms []queryTerm, reader postingBlockReader, rank func(uint32, []queryTerm) float64) ([]Result, error) {
+func disjunctiveResults(query_terms []queryTerm, reader postingBlockReader, rank func(uint32, []queryTerm) (float64, error)) ([]Result, error) {
 	var query_results resultHeap
 	matching_terms := make([]queryTerm, 0, len(query_terms))
 
@@ -203,7 +212,13 @@ func disjunctiveResults(query_terms []queryTerm, reader postingBlockReader, rank
 				matching_terms = append(matching_terms, *term)
 			}
 		}
-		result := Result{DocID: candidate_doc_id, Score: rank(candidate_doc_id, matching_terms)}
+
+		score, err := rank(candidate_doc_id, matching_terms)
+		if err != nil {
+			return nil, err
+		}
+
+		result := Result{DocID: candidate_doc_id, Score: score}
 		retainResult(&query_results, result)
 
 		// Advance only the lists that contributed. Exhausted lists do not end OR.
@@ -216,4 +231,36 @@ func disjunctiveResults(query_terms []queryTerm, reader postingBlockReader, rank
 			}
 		}
 	}
+}
+
+func bm25Score(doc_id uint32, matching_terms []queryTerm, reader documentReader, statistics finalindex.CollectionStats) (float64, error) {
+	if len(matching_terms) == 0 {
+		return 0, nil
+	}
+
+	if statistics.NumDocs == 0 || statistics.AvgDocLength <= 0 || math.IsNaN(statistics.AvgDocLength) || math.IsInf(statistics.AvgDocLength, 0) {
+		return 0, fmt.Errorf("BM25 requires a positive document count and average document length")
+	}
+	document, err := reader.Document(doc_id)
+	if err != nil {
+		return 0, fmt.Errorf("document %d: %w", doc_id, err)
+	}
+	if uint64(doc_id) >= statistics.NumDocs || document.Length == 0 {
+		return 0, fmt.Errorf("invalid scoring document %d or document length", doc_id)
+	}
+
+	length_normalization := K1 * (1 - B + B*float64(document.Length)/statistics.AvgDocLength)
+	var score float64
+	for _, term := range matching_terms {
+		posting := term.current()
+		document_frequency := term.entry.DocFrequency
+		if posting.DocID != doc_id || posting.Frequency == 0 || document_frequency == 0 || document_frequency > statistics.NumDocs {
+			return 0, fmt.Errorf("invalid BM25 posting or document frequency for term %q", term.term)
+		}
+		// Positive IDF variant: ln(1 + (N - df + 0.5)/(df + 0.5)).
+		inverse_document_frequency := math.Log1p((float64(statistics.NumDocs-document_frequency) + 0.5) / (float64(document_frequency) + 0.5))
+		term_frequency := float64(posting.Frequency)
+		score += inverse_document_frequency * term_frequency * (K1 + 1) / (term_frequency + length_normalization)
+	}
+	return score, nil
 }
