@@ -12,7 +12,7 @@ import (
 	"strings"
 )
 
-// Entry is one row of lexicon.tsv. Offsets are absolute bytes in blocks.bin.
+// Entry is one row of lexicon.tsv. Offsets are absolute bytes in blocks.bin
 type Entry struct {
 	Term                                   string
 	DocFrequency, BlocksOffset, BlockCount uint64
@@ -42,13 +42,13 @@ func ParseEntry(line string) (Entry, error) {
 	return lexicon_entry, nil
 }
 
-// Reader owns the shared index files and lexicon used by list cursors.
+// Reader owns the shared index files and lexicon used by list cursors
 type Reader struct {
 	posts, blocks, pages *os.File
 	lexicon              map[string]Entry
 }
 
-// Open validates the index, opens its binary files, and loads its lexicon.
+// Open validates the index, opens its binary files, and loads its lexicon
 func Open(dir string) (r *Reader, err error) {
 	if _, e := os.Stat(filepath.Join(dir, "INCOMPLETE")); e == nil {
 		return nil, fmt.Errorf("index build is incomplete")
@@ -112,7 +112,7 @@ func (r *Reader) Close() error {
 	return first
 }
 
-// BlockDescriptor locates one compressed posting block and describes its contents.
+// BlockDescriptor locates one compressed posting block and describes its contents
 type BlockDescriptor struct {
 	LastDocID, PostingCount uint32
 	PayloadOffset           uint64
@@ -120,7 +120,7 @@ type BlockDescriptor struct {
 	FrequencyBytes          uint32
 }
 
-// BlockDescriptors reads only this term's consecutive descriptors in one read.
+// BlockDescriptors reads only this term's consecutive descriptors in one read
 func (r *Reader) BlockDescriptors(entry Entry) ([]BlockDescriptor, error) {
 	if entry.BlocksOffset < 4 || entry.BlocksOffset%24 != 4 ||
 		entry.BlocksOffset > math.MaxInt64 || entry.BlockCount == 0 ||
@@ -179,7 +179,7 @@ func decodeBlockDescriptor(header []byte) (BlockDescriptor, error) {
 
 type Posting struct{ DocID, Frequency uint32 }
 
-// readDocumentBlock reads only the docID chunk. Frequencies stay on disk.
+// readDocumentBlock reads only the docID chunk. Frequencies stay on disk
 func (r *Reader) readDocumentBlock(descriptor BlockDescriptor) ([]uint32, error) {
 	if err := validatePayloadDescriptor(descriptor); err != nil {
 		return nil, err
@@ -247,7 +247,7 @@ func validatePayloadDescriptor(descriptor BlockDescriptor) error {
 }
 
 // ReadPostingBlock fully decodes a block for inspection and interoperability
-// checks. Query algorithms use List.NextGEQ and List.GetFreq instead.
+// checks. Query algorithms use List.NextGEQ and List.GetFreq instead
 func (r *Reader) ReadPostingBlock(descriptor BlockDescriptor) ([]Posting, error) {
 	docs, err := r.readDocumentBlock(descriptor)
 	if err != nil {
@@ -264,7 +264,7 @@ func (r *Reader) ReadPostingBlock(descriptor BlockDescriptor) ([]Posting, error)
 	return postings, nil
 }
 
-// Document is the original Rust 16-byte page-table record.
+// Document is the original Rust 16-byte page-table record
 type Document struct {
 	PID, Length uint32
 	Offset      uint64

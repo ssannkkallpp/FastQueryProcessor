@@ -19,12 +19,14 @@ cargo test --release
 |---|---|---|
 | `--input PATH` | `data/collection.tsv` | `pid<TAB>passage` per line |
 | `--dir PATH` | `data` | output directory |
-| `--mem-mb N` | `1024` | RAM for posting buffers (two buffers of N/2) |
+| `--mem-mb N` | `1024` | initial posting-buffer budget in MiB, split equally; minimum 4 |
 | `--limit N` | `0` (all) | stop after N passages |
 | `--show` | off | print every posting (term, docID, freq) |
 | `--ascii` | off | write runs as `.tsv` text instead of binary |
 
 Flags also work with a single dash (`-input`), like the Go version.
+Rerunning the parser deletes matching old run files and overwrites the document
+table and metadata in the selected output directory.
 
 Output:
 
@@ -44,10 +46,10 @@ Inspect or validate runs:
 
 ## How it works
 
-This is the lecture's **Merge-Sort Improved** algorithm, not a dynamic
-in-memory index (DIMDS):
+This is the lecture's **Merge-Sort Improved** algorithm:
 
-1. Read the collection line by line; assign docIDs 0, 1, 2, ... in file order.
+1. Read the collection line by line; assign docIDs 0, 1, 2, ... to valid passage
+   lines in file order. Lines without a tab are skipped and receive no docID.
 2. Tokenize the passage, then sort its terms locally so repeated terms are
    adjacent. This turns repeated occurrences into a single
    `(term, docID, freq)` posting per distinct term.
@@ -61,9 +63,8 @@ in-memory index (DIMDS):
    `(term, docID)` and writes it as one run. The main thread meanwhile keeps
    parsing into a second buffer, which overlaps sorting with parsing.
 
-The sort compares the 8-byte big-endian term prefixes first. Most
-comparisons therefore never touch the term bytes, which matters because the
-buffer is far larger than the CPU caches.
+The sort compares the 8-byte big-endian term prefixes first. Unequal prefixes
+avoid comparing the term bytes.
 
 Because docIDs only increase, every docID in run *k+1* is larger than every
 docID in run *k*. The merger can build each final inverted list by
@@ -82,8 +83,7 @@ The Rust parser uses these rules:
 - There is no stemming and no stopword removal.
 
 The Go query processor currently lowercases and splits on whitespace instead.
-For example, indexing `cat,dog` produces `cat` and `dog`, while querying
-`cat,dog` looks up that entire string. Query terms are also deduplicated.
+For example, indexing `cat,dog` produces `cat` and `dog`.
 
 ### Run file format (`src/runfile.rs`)
 
@@ -95,7 +95,8 @@ record:  term_len | term | count | last_doc | docs_len | freqs_len
 
 All integers in a record are varbyte. Records are in byte order of the term.
 DocIDs and frequencies are stored in separate blocks, not interleaved.
-`last_doc` lets the merger re-base the first gap of the next run's record.
+The Go merger decodes source gaps and re-encodes output blocks; it uses
+`last_doc` to validate each decoded source record.
 
 ### Page table (`src/doctable.rs`)
 
@@ -103,7 +104,7 @@ The page table uses fixed 16-byte records, so record *d* sits at byte
 `16*d`. Each record holds:
 
 - `pid` (u32)
-- `len` (u32), the number of terms, used by BM25
+- `len` (u32), accepted token occurrences including repetitions, used by BM25
 - `offset` (u64), the byte position of the passage in the collection file,
   so snippets can be fetched later
 
@@ -166,6 +167,8 @@ No application-wide posting cache is used.
 AND evaluation orders lists shortest first and scores only intersection
 members. OR evaluation merges current docIDs and scores each union member
 once. Missing terms yield no AND matches and contribute nothing to OR.
+Queries return up to ten matches, ranked by descending BM25 score; lower docID
+wins equal-score ties. The CLI prints PID, docID, and score without fetching snippets.
 All opened cursors close on success or error. No stored impact-score getter is
 needed because scoring uses frequencies.
 

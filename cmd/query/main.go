@@ -22,7 +22,7 @@ func run() error {
 	indexDir := flag.String("dir", "data/final-index", "final index directory")
 	flag.Parse()
 
-	// Open the binary files and load the lexicon once for all queries.
+	// Open the binary files and load the lexicon once for all queries
 	index_reader, err := finalindex.Open(*indexDir)
 	if err != nil {
 		return err

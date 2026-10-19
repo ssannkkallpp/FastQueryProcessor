@@ -1,4 +1,4 @@
-// Package query evaluates queries through the inverted-list cursor API.
+// Package query evaluates queries through the inverted-list cursor API
 package query
 
 import (
@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-// Evaluate returns up to ten BM25-ranked results for an AND or OR query.
+// Evaluate returns up to ten BM25-ranked results for an AND or OR query
 func Evaluate(text, mode string, reader *finalindex.Reader, statistics finalindex.CollectionStats) ([]Result, error) {
 	if mode != "conjunctive" && mode != "disjunctive" {
 		return nil, fmt.Errorf("unknown query mode %q", mode)
@@ -45,8 +45,8 @@ func Evaluate(text, mode string, reader *finalindex.Reader, statistics finalinde
 	return results, nil
 }
 
-// Opening a query establishes list cursors without decompressing any postings.
-// Missing terms end AND queries and contribute nothing to OR queries.
+// Opening a query establishes list cursors without decompressing any postings
+// Missing terms end AND queries and contribute nothing to OR queries
 func openQueryLists(text string, reader *finalindex.Reader) ([]listCursor, bool, error) {
 	var lists []listCursor
 	seen := make(map[string]bool)

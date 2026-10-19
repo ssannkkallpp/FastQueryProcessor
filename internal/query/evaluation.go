@@ -11,13 +11,13 @@ import (
 const K1 = 1.2
 const B = 0.75
 
-// documentReader retrieves one candidate's length without loading the page table.
+// documentReader retrieves one candidate's length without loading the page table
 type documentReader interface {
 	Document(uint32) (finalindex.Document, error)
 }
 
-// listCursor is the complete posting-list boundary used by query algorithms.
-// Storage, descriptors, decompression, and buffer state stay inside finalindex.
+// listCursor is the complete posting-list boundary used by query processing
+// Storage, descriptors, decompression, and buffer state stay inside finalindex
 type listCursor interface {
 	NextGEQ(uint64) (uint64, error)
 	GetFreq() (uint32, error)
@@ -25,13 +25,13 @@ type listCursor interface {
 	Close()
 }
 
-// Result contains a retained document, its original PID, and its score.
+// Result contains a retained document, its original PID, and its score
 type Result struct {
 	DocID, PID uint32
 	Score      float64
 }
 
-// resultHeap keeps the worst retained result at its root; lower docID wins ties.
+// resultHeap keeps the worst retained result at its root; lower docID wins ties
 type resultHeap []Result
 
 func (results resultHeap) Len() int { return len(results) }
@@ -50,12 +50,15 @@ func (results *resultHeap) Pop() any {
 	return value
 }
 
-// conjunctiveResults aligns lists in shortest-first order, scoring only matches.
+// conjunctiveResults aligns lists in shortest-first order, scoring only matches
 func conjunctiveResults(lists []listCursor, rank func(uint32, []listCursor) (float64, error)) ([]Result, error) {
 	var results resultHeap
+
+	// Protect against empty lists since we later access the 0th smallest list
 	if len(lists) == 0 {
 		return nil, nil
 	}
+
 	var target uint64
 	for {
 		candidate, err := lists[0].NextGEQ(target)
@@ -65,6 +68,7 @@ func conjunctiveResults(lists []listCursor, rank func(uint32, []listCursor) (flo
 		if candidate == finalindex.EndDocID {
 			return sortedResults(results), nil
 		}
+
 		aligned := true
 		for _, list := range lists[1:] {
 			doc, err := list.NextGEQ(candidate)
@@ -80,6 +84,7 @@ func conjunctiveResults(lists []listCursor, rank func(uint32, []listCursor) (flo
 				break
 			}
 		}
+
 		if !aligned {
 			continue
 		}
@@ -87,12 +92,13 @@ func conjunctiveResults(lists []listCursor, rank func(uint32, []listCursor) (flo
 		if err != nil {
 			return nil, err
 		}
+
 		retainResult(&results, Result{DocID: uint32(candidate), Score: score})
 		target = candidate + 1
 	}
 }
 
-// Keep at most ten results, with the worst retained result at the heap root.
+// Keep at most ten results, with the worst retained result at the heap root
 func retainResult(query_results *resultHeap, result Result) {
 	if query_results.Len() < 10 {
 		heap.Push(query_results, result)
@@ -113,7 +119,7 @@ func sortedResults(results resultHeap) []Result {
 	return []Result(results)
 }
 
-// disjunctiveResults merges current docIDs and scores every union member once.
+// disjunctiveResults merges current docIDs and scores every union member once
 func disjunctiveResults(lists []listCursor, rank func(uint32, []listCursor) (float64, error)) ([]Result, error) {
 	var results resultHeap
 	current := make([]uint64, len(lists))
@@ -182,14 +188,16 @@ func bm25Score(doc_id uint32, matching_terms []listCursor, reader documentReader
 		if err != nil {
 			return 0, err
 		}
+
 		document_frequency := term.DocFrequency()
 		if frequency == 0 || document_frequency == 0 || document_frequency > statistics.NumDocs {
 			return 0, fmt.Errorf("invalid BM25 frequency or document frequency")
 		}
-		// Positive IDF variant: ln(1 + (N - df + 0.5)/(df + 0.5)).
+		// Positive IDF variant: ln(1 + (N - df + 0.5)/(df + 0.5))
 		inverse_document_frequency := math.Log1p((float64(statistics.NumDocs-document_frequency) + 0.5) / (float64(document_frequency) + 0.5))
 		term_frequency := float64(frequency)
 		score += inverse_document_frequency * term_frequency * (K1 + 1) / (term_frequency + length_normalization)
 	}
+
 	return score, nil
 }

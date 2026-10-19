@@ -8,13 +8,13 @@ import (
 	"strings"
 )
 
-// CollectionStats supplies the collection-wide inputs needed by BM25.
+// CollectionStats supplies the collection-wide stats needed by BM25
 type CollectionStats struct {
 	NumDocs      uint64
 	AvgDocLength float64
 }
 
-// LoadCollectionStats reads the Rust collection metadata once at startup.
+// LoadCollectionStats reads the collection metadata once at startup
 func LoadCollectionStats(path string) (CollectionStats, error) {
 	metadata, err := os.ReadFile(path)
 	if err != nil {
