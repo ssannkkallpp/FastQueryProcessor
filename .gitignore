@@ -1,3 +1,9 @@
 /data/
 /parser
 *.pprof
+
+# Rust build output
+/target/
+
+# Local artifacts from the previous Go parser
+/main_test.go

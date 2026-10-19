@@ -1,0 +1,23 @@
+[package]
+name = "FastQuerryProcessor"
+version = "0.1.0"
+edition = "2021"
+description = "CS 6913 Assignment 2: Querry Processor"
+
+[lib]
+name = "index"
+path = "src/lib.rs"
+
+[[bin]]
+name = "parse"
+path = "src/bin/parse.rs"
+
+[[bin]]
+name = "dumprun"
+path = "src/bin/dumprun.rs"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+debug = false
