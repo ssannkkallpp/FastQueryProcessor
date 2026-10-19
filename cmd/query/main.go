@@ -37,6 +37,7 @@ func run() error {
 
 	input := bufio.NewScanner(os.Stdin)
 	input.Buffer(make([]byte, 4096), 1<<20)
+	queryCache := make(map[string][]queryengine.Result)
 	fmt.Println("Enter a query, or :quit to exit")
 
 	for {
@@ -72,18 +73,25 @@ func run() error {
 			fmt.Println("Please enter conjunctive or disjunctive.")
 		}
 
-		if err := processQuery(query, mode, index_reader, statistics); err != nil {
+		if err := processQuery(query, mode, index_reader, statistics, queryCache); err != nil {
 			return err
 		}
 	}
 }
 
 // Process the given query and hand off final results to the print helper
-func processQuery(query_text, mode string, index_reader *finalindex.Reader, statistics finalindex.CollectionStats) error {
+func processQuery(query_text, mode string, index_reader *finalindex.Reader, statistics finalindex.CollectionStats, cache map[string][]queryengine.Result) error {
+	// Include the mode so AND and OR results are cached separately
+	key := mode + "\x00" + strings.Join(strings.Fields(strings.ToLower(query_text)), " ")
+	if results, found := cache[key]; found {
+		printQueryOutput(results)
+		return nil
+	}
 	results, err := queryengine.Evaluate(query_text, mode, index_reader, statistics)
 	if err != nil {
 		return err
 	}
+	cache[key] = results
 	printQueryOutput(results)
 	return nil
 }
