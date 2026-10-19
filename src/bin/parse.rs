@@ -18,8 +18,9 @@
 //!    arena of term strings plus an array of fixed-size posting records.
 //! 3. When the buffer is full, hand it to a background thread that sorts it by
 //!    (term, docID) and writes it out as one run, while the main thread keeps
-//!    parsing into a second buffer. Memory use is therefore bounded by two
-//!    buffers (`--mem-mb` in total), independent of the collection size.
+//!    parsing into a second buffer. `--mem-mb` budgets their initial posting
+//!    capacity; oversized passages can grow a buffer, and scratch space and
+//!    I/O buffers consume additional memory.
 
 use index::doctable::{DocRecord, DocTableWriter};
 use index::runfile::{encode_postings, RunWriter};
@@ -96,7 +97,8 @@ struct Post {
 
 const POST_BYTES: usize = std::mem::size_of::<Post>(); // 24
 
-/// Preallocated buffer of postings. never grows, so memory use is fixed.
+/// Preallocated posting buffer, reused between runs. An oversized passage
+/// can grow its capacity in the main parse loop.
 struct Buffer {
     posts: Vec<Post>,
     arena: Vec<u8>,
