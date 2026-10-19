@@ -1,8 +1,9 @@
-//! The three executables (parse -> merge -> query) all link against this
-//! library so they agree on tokenization, compression and file formats:
+//! Shared Rust modules used by the `parse` and `dumprun` executables.
+//! The Go merger and query processor exchange data with Rust through files;
+//! they do not link against this library.
 //!
-//! * [`tokenizer`]:  turns raw passage bytes into lowercase terms. The query
-//!   processor must use exactly the same function on user queries.
+//! * [`tokenizer`]: turns raw passage bytes into lowercase terms. The Go query
+//!   processor currently uses lowercase whitespace splitting instead.
 //! * [`varbyte`]: variable-byte integer coding used for all postings.
 //! * [`runfile`]: the intermediate "run" format written by `parse` and
 //!   consumed by `merge`.

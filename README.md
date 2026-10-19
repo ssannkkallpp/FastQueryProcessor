@@ -53,8 +53,9 @@ in-memory index (DIMDS):
    `(term, docID, freq)` posting per distinct term.
 3. Append the postings to a large preallocated buffer: an array of fixed
    24-byte records `(8-byte term prefix, docID, freq, offset, length)` plus a
-   byte arena holding the term strings. The buffer never grows, so memory use
-   is fixed by `--mem-mb`.
+   byte arena holding the term strings. `--mem-mb` budgets the initial capacity
+   of both posting buffers, not total process memory. A passage too large for
+   an empty buffer can grow it; see [buffer memory](BUFFER_MEMORY.md).
 4. When the buffer is full, hand it to a background thread that sorts it by
    `(term, docID)` and writes it as one run. The main thread meanwhile keeps
    parsing into a second buffer, which overlaps sorting with parsing.
@@ -70,8 +71,7 @@ merge on terms and never has to re-sort docIDs.
 
 ### Tokenization (`src/tokenizer.rs`)
 
-The rules are identical to the Go reference, and the query processor will
-reuse the same function:
+The Rust parser uses these rules:
 
 - ASCII letters and digits form terms, and letters are lowercased.
 - Every other ASCII byte is a separator, so `don't` becomes `don`, `t`.
@@ -79,6 +79,10 @@ reuse the same function:
   foreign-language text and never fails on malformed UTF-8.
 - Tokens longer than 64 bytes are dropped.
 - There is no stemming and no stopword removal.
+
+The Go query processor currently lowercases and splits on whitespace instead.
+For example, indexing `cat,dog` produces `cat` and `dog`, while querying
+`cat,dog` looks up that entire string. Query terms are also deduplicated.
 
 ### Run file format (`src/runfile.rs`)
 
@@ -117,7 +121,7 @@ change it with `-block-size N`. The merger writes varbyte-compressed posting
 blocks, a binary block directory for docID skipping, a TSV lexicon, and a copy
 of the Rust document table for docID-to-PID lookup. See
 [the final index format](internal/finalindex/FORMAT.md) for the byte layout
-and the `SeekGE`/`Document` reader APIs.
+and the `BlockDescriptors`, `ReadPostingBlock`, and `Document` reader APIs.
 
 ## Query CLI and package layout
 
@@ -128,9 +132,11 @@ go run ./cmd/query
 - `cmd/query/main.go`: CLI input, startup wiring, and result printing.
 - `internal/query/query.go`: `Evaluate` entry point, term preparation, and PID resolution.
 - `internal/query/evaluation.go`: posting iterators, AND/OR DAAT evaluation,
-  the top-ten heap, and the BM25 scoring placeholder.
+  the top-ten heap.
 - `internal/finalindex/lexicon.go`: `LoadLexicon`, called once at startup.
 - `internal/finalindex/reader.go`: binary index reads and decompression.
 
-BM25 scores are still placeholders; query tokenization currently lowercases
-and splits on whitespace. The existing compressed index format is unchanged.
+BM25 scoring is implemented in `internal/query/evaluation.go` using k1=1.2,
+b=0.75 and positive IDF. Collection statistics load once at CLI startup;
+candidate document lengths are read on demand. Query tokenization currently
+lowercases and splits on whitespace. The existing compressed index format is unchanged.
