@@ -1,78 +1,77 @@
-// Package query evaluates queries using block-based DAAT traversal.
+// Package query evaluates queries through the inverted-list cursor API.
 package query
 
 import (
+	"errors"
 	"fmt"
 	"searchindex/internal/finalindex"
+	"sort"
 	"strings"
 )
 
-// Evaluate returns the top ten results for an AND or OR query without printing.
-func Evaluate(query, mode string, lexicon map[string]finalindex.Entry, index_reader *finalindex.Reader, statistics finalindex.CollectionStats) ([]Result, error) {
+// Evaluate returns up to ten BM25-ranked results for an AND or OR query.
+func Evaluate(text, mode string, reader *finalindex.Reader, statistics finalindex.CollectionStats) ([]Result, error) {
 	if mode != "conjunctive" && mode != "disjunctive" {
 		return nil, fmt.Errorf("unknown query mode %q", mode)
 	}
-	query_terms, missing_term, err := loadQueryTerms(query, lexicon, index_reader)
+	lists, missing, err := openQueryLists(text, reader)
 	if err != nil {
 		return nil, err
 	}
-
-	rank := func(doc_id uint32, matching_terms []queryTerm) (float64, error) {
-		return bm25Score(doc_id, matching_terms, index_reader, statistics)
+	defer closeLists(lists)
+	if mode == "conjunctive" && missing {
+		return nil, nil
 	}
-
+	rank := func(doc uint32, matching []listCursor) (float64, error) {
+		return bm25Score(doc, matching, reader, statistics)
+	}
 	var results []Result
 	if mode == "conjunctive" {
-		if missing_term || len(query_terms) == 0 {
-			return nil, nil
-		}
-		results, err = conjunctiveResults(query_terms, index_reader, rank)
-	} else if mode == "disjunctive" {
-		// Missing terms contribute zero; process every term that exists.
-		results, err = disjunctiveResults(query_terms, index_reader, rank)
+		sort.SliceStable(lists, func(i, j int) bool { return lists[i].DocFrequency() < lists[j].DocFrequency() })
+		results, err = conjunctiveResults(lists, rank)
+	} else {
+		results, err = disjunctiveResults(lists, rank)
 	}
 	if err != nil {
 		return nil, err
 	}
-
-	// Resolve PIDs only for the retained results, not for every candidate.
-	for index := range results {
-		document, err := index_reader.Document(results[index].DocID)
+	for i := range results {
+		document, err := reader.Document(results[i].DocID)
 		if err != nil {
 			return nil, err
 		}
-		results[index].PID = document.PID
+		results[i].PID = document.PID
 	}
 	return results, nil
 }
 
-// loadQueryTerms loads descriptors and one posting block per distinct query term.
-func loadQueryTerms(query string, lexicon map[string]finalindex.Entry, index_reader *finalindex.Reader) ([]queryTerm, bool, error) {
-	terms := strings.Fields(strings.ToLower(query))
-	query_terms := make([]queryTerm, 0, len(terms))
-	seen_terms := make(map[string]bool)
-	missing_term := false
-	for _, term := range terms {
-		if seen_terms[term] {
+// Opening a query establishes list cursors without decompressing any postings.
+// Missing terms end AND queries and contribute nothing to OR queries.
+func openQueryLists(text string, reader *finalindex.Reader) ([]listCursor, bool, error) {
+	var lists []listCursor
+	seen := make(map[string]bool)
+	missing := false
+	for _, term := range strings.Fields(strings.ToLower(text)) {
+		if seen[term] {
 			continue
 		}
-		seen_terms[term] = true
-		entry, found := lexicon[term]
-		if !found {
-			missing_term = true
+		seen[term] = true
+		list, err := reader.OpenList(term)
+		if errors.Is(err, finalindex.ErrTermNotFound) {
+			missing = true
 			continue
 		}
-		descriptors, err := index_reader.BlockDescriptors(entry)
 		if err != nil {
-			return nil, false, fmt.Errorf("%s descriptors: %w", term, err)
+			closeLists(lists)
+			return nil, false, err
 		}
-		postings, err := index_reader.ReadPostingBlock(descriptors[0])
-		if err != nil {
-			return nil, false, fmt.Errorf("%s postings: %w", term, err)
-		}
-		query_terms = append(query_terms, queryTerm{
-			term: term, entry: entry, block_descriptors: descriptors, postings: postings,
-		})
+		lists = append(lists, list)
 	}
-	return query_terms, missing_term, nil
+	return lists, missing, nil
+}
+
+func closeLists(lists []listCursor) {
+	for _, list := range lists {
+		list.Close()
+	}
 }

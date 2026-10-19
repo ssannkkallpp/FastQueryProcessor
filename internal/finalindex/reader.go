@@ -42,16 +42,20 @@ func ParseEntry(line string) (Entry, error) {
 	return lexicon_entry, nil
 }
 
-// Reader supports block selection and fixed-position document-table lookup.
-// It does not load the lexicon: a query processor can choose its lookup strategy.
-type Reader struct{ posts, blocks, pages *os.File }
+// Reader owns the shared index files and lexicon used by list cursors.
+type Reader struct {
+	posts, blocks, pages *os.File
+	lexicon              map[string]Entry
+}
 
+// Open validates the index, opens its binary files, and loads its lexicon.
 func Open(dir string) (r *Reader, err error) {
 	if _, e := os.Stat(filepath.Join(dir, "INCOMPLETE")); e == nil {
 		return nil, fmt.Errorf("index build is incomplete")
 	} else if !os.IsNotExist(e) {
 		return nil, e
 	}
+
 	r = &Reader{}
 	opened := r
 	defer func() {
@@ -59,23 +63,39 @@ func Open(dir string) (r *Reader, err error) {
 			opened.Close()
 		}
 	}()
-	for _, item := range []struct {
-		name, magic string
-		dst         **os.File
-	}{{"postings.bin", "FIP1", &r.posts}, {"blocks.bin", "FIB1", &r.blocks}, {"pagetable.bin", "", &r.pages}} {
-		*item.dst, err = os.Open(filepath.Join(dir, item.name))
-		if err != nil {
-			return nil, err
-		}
-		if item.magic != "" {
-			var h [4]byte
-			if _, err = io.ReadFull(*item.dst, h[:]); err != nil {
-				return nil, err
-			}
-			if string(h[:]) != item.magic {
-				return nil, fmt.Errorf("bad %s header", item.name)
-			}
-		}
+
+	r.posts, err = os.Open(filepath.Join(dir, "postings.bin"))
+	if err != nil {
+		return nil, err
+	}
+	var postingsHeader [4]byte
+	if _, err = io.ReadFull(r.posts, postingsHeader[:]); err != nil {
+		return nil, err
+	}
+	if string(postingsHeader[:]) != "FIP1" {
+		return nil, fmt.Errorf("bad postings.bin header")
+	}
+
+	r.blocks, err = os.Open(filepath.Join(dir, "blocks.bin"))
+	if err != nil {
+		return nil, err
+	}
+	var blocksHeader [4]byte
+	if _, err = io.ReadFull(r.blocks, blocksHeader[:]); err != nil {
+		return nil, err
+	}
+	if string(blocksHeader[:]) != "FIB1" {
+		return nil, fmt.Errorf("bad blocks.bin header")
+	}
+
+	r.pages, err = os.Open(filepath.Join(dir, "pagetable.bin"))
+	if err != nil {
+		return nil, err
+	}
+
+	r.lexicon, err = LoadLexicon(filepath.Join(dir, "lexicon.tsv"))
+	if err != nil {
+		return nil, err
 	}
 	return r, nil
 }
@@ -101,7 +121,6 @@ type BlockDescriptor struct {
 }
 
 // BlockDescriptors reads only this term's consecutive descriptors in one read.
-// It does not read or decompress any posting payloads.
 func (r *Reader) BlockDescriptors(entry Entry) ([]BlockDescriptor, error) {
 	if entry.BlocksOffset < 4 || entry.BlocksOffset%24 != 4 ||
 		entry.BlocksOffset > math.MaxInt64 || entry.BlockCount == 0 ||
@@ -160,41 +179,87 @@ func decodeBlockDescriptor(header []byte) (BlockDescriptor, error) {
 
 type Posting struct{ DocID, Frequency uint32 }
 
-// ReadPostingBlock loads and decodes one descriptor's payload from postings.bin.
-func (r *Reader) ReadPostingBlock(descriptor BlockDescriptor) ([]Posting, error) {
-	count := uint64(descriptor.PostingCount)
-	document_bytes, frequency_bytes := uint64(descriptor.DocumentBytes), uint64(descriptor.FrequencyBytes)
-	payload_bytes := document_bytes + frequency_bytes
-	if count == 0 || count > 65536 || document_bytes < count || document_bytes > 5*count ||
-		frequency_bytes < count || frequency_bytes > 5*count || descriptor.PayloadOffset < 4 ||
-		descriptor.PayloadOffset > math.MaxInt64-payload_bytes {
-		return nil, fmt.Errorf("invalid posting block descriptor")
+// readDocumentBlock reads only the docID chunk. Frequencies stay on disk.
+func (r *Reader) readDocumentBlock(descriptor BlockDescriptor) ([]uint32, error) {
+	if err := validatePayloadDescriptor(descriptor); err != nil {
+		return nil, err
 	}
-	payload := make([]byte, int(payload_bytes))
+	payload := make([]byte, int(descriptor.DocumentBytes))
 	if _, err := r.posts.ReadAt(payload, int64(descriptor.PayloadOffset)); err != nil {
 		return nil, err
 	}
-	document_reader := bytes.NewReader(payload[:descriptor.DocumentBytes])
-	frequency_reader := bytes.NewReader(payload[descriptor.DocumentBytes:])
-	postings := make([]Posting, 0, descriptor.PostingCount)
-	var doc_id uint64
-	for index := uint32(0); index < descriptor.PostingCount; index++ {
-		gap, err := binary.ReadUvarint(document_reader)
+	encoded := bytes.NewReader(payload)
+	docs := make([]uint32, descriptor.PostingCount)
+	var doc uint64
+	for i := range docs {
+		gap, err := binary.ReadUvarint(encoded)
 		if err != nil {
 			return nil, err
 		}
-		frequency, err := binary.ReadUvarint(frequency_reader)
-		if err != nil {
-			return nil, err
+		if gap > math.MaxUint32-doc || i > 0 && gap == 0 {
+			return nil, fmt.Errorf("invalid document gap")
 		}
-		if gap > math.MaxUint32-doc_id || index > 0 && gap == 0 || frequency == 0 || frequency > math.MaxUint32 {
-			return nil, fmt.Errorf("invalid block posting")
-		}
-		doc_id += gap
-		postings = append(postings, Posting{DocID: uint32(doc_id), Frequency: uint32(frequency)})
+		doc += gap
+		docs[i] = uint32(doc)
 	}
-	if doc_id != uint64(descriptor.LastDocID) || document_reader.Len() != 0 || frequency_reader.Len() != 0 {
-		return nil, fmt.Errorf("inconsistent posting block")
+	if doc != uint64(descriptor.LastDocID) || encoded.Len() != 0 {
+		return nil, fmt.Errorf("inconsistent document chunk")
+	}
+	return docs, nil
+}
+
+func (r *Reader) readFrequencyBlock(descriptor BlockDescriptor) ([]uint32, error) {
+	if err := validatePayloadDescriptor(descriptor); err != nil {
+		return nil, err
+	}
+	payload := make([]byte, int(descriptor.FrequencyBytes))
+	offset := descriptor.PayloadOffset + uint64(descriptor.DocumentBytes)
+	if _, err := r.posts.ReadAt(payload, int64(offset)); err != nil {
+		return nil, err
+	}
+	encoded := bytes.NewReader(payload)
+	freqs := make([]uint32, descriptor.PostingCount)
+	for i := range freqs {
+		freq, err := binary.ReadUvarint(encoded)
+		if err != nil {
+			return nil, err
+		}
+		if freq == 0 || freq > math.MaxUint32 {
+			return nil, fmt.Errorf("invalid frequency")
+		}
+		freqs[i] = uint32(freq)
+	}
+	if encoded.Len() != 0 {
+		return nil, fmt.Errorf("inconsistent frequency chunk")
+	}
+	return freqs, nil
+}
+
+func validatePayloadDescriptor(descriptor BlockDescriptor) error {
+	count := uint64(descriptor.PostingCount)
+	docs, freqs := uint64(descriptor.DocumentBytes), uint64(descriptor.FrequencyBytes)
+	if count == 0 || count > 65536 || docs < count || docs > 5*count ||
+		freqs < count || freqs > 5*count || descriptor.PayloadOffset < 4 ||
+		descriptor.PayloadOffset > math.MaxInt64-docs-freqs {
+		return fmt.Errorf("invalid posting block descriptor")
+	}
+	return nil
+}
+
+// ReadPostingBlock fully decodes a block for inspection and interoperability
+// checks. Query algorithms use List.NextGEQ and List.GetFreq instead.
+func (r *Reader) ReadPostingBlock(descriptor BlockDescriptor) ([]Posting, error) {
+	docs, err := r.readDocumentBlock(descriptor)
+	if err != nil {
+		return nil, err
+	}
+	freqs, err := r.readFrequencyBlock(descriptor)
+	if err != nil {
+		return nil, err
+	}
+	postings := make([]Posting, len(docs))
+	for i := range postings {
+		postings[i] = Posting{DocID: docs[i], Frequency: freqs[i]}
 	}
 	return postings, nil
 }

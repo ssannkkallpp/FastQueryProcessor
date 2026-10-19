@@ -2,9 +2,11 @@ package main
 
 import (
 	"bufio"
+	"flag"
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"searchindex/internal/finalindex"
 	queryengine "searchindex/internal/query"
 	"strings"
@@ -17,16 +19,18 @@ func main() {
 }
 
 func run() error {
-	lexicon, err := finalindex.LoadLexicon("data/final-index/lexicon.tsv")
-	if err != nil {
-		return err
-	}
-	index_reader, err := finalindex.Open("data/final-index")
+	indexDir := flag.String("dir", "data/final-index", "final index directory")
+	flag.Parse()
+
+	// Open the binary files and load the lexicon once for all queries.
+	index_reader, err := finalindex.Open(*indexDir)
 	if err != nil {
 		return err
 	}
 	defer index_reader.Close()
-	statistics, err := finalindex.LoadCollectionStats("data/final-index/collection-meta.txt")
+
+	// Read metadata to store average document length and number of documents
+	statistics, err := finalindex.LoadCollectionStats(filepath.Join(*indexDir, "collection-meta.txt"))
 	if err != nil {
 		return err
 	}
@@ -68,15 +72,15 @@ func run() error {
 			fmt.Println("Please enter conjunctive or disjunctive.")
 		}
 
-		if err := processQuery(query, mode, lexicon, index_reader, statistics); err != nil {
+		if err := processQuery(query, mode, index_reader, statistics); err != nil {
 			return err
 		}
 	}
 }
 
-// Process the given query and print only the final results.
-func processQuery(query_text, mode string, lexicon map[string]finalindex.Entry, index_reader *finalindex.Reader, statistics finalindex.CollectionStats) error {
-	results, err := queryengine.Evaluate(query_text, mode, lexicon, index_reader, statistics)
+// Process the given query and hand off final results to the print helper
+func processQuery(query_text, mode string, index_reader *finalindex.Reader, statistics finalindex.CollectionStats) error {
+	results, err := queryengine.Evaluate(query_text, mode, index_reader, statistics)
 	if err != nil {
 		return err
 	}
@@ -84,7 +88,7 @@ func processQuery(query_text, mode string, lexicon map[string]finalindex.Entry, 
 	return nil
 }
 
-// printQueryOutput formats only final results; all index reads happen beforehand.
+// Format and print final results
 func printQueryOutput(results []queryengine.Result) {
 	if len(results) == 0 {
 		fmt.Println("No results.")
