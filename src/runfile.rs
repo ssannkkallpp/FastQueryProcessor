@@ -1,9 +1,8 @@
 //! Intermediate "run" files: the output of `parse`, the input of `merge`.
 //!
-//! `parse` fills a fixed-size RAM buffer with (term, docID, freq) postings.
+//!`parse` fills a fixed-size RAM buffer with (term, docID, freq) postings.
 //! When the buffer is full it is sorted by (term, docID) and written out as
-//! one run, grouped by term (slides: "Merge-Sort Improved": write the term
-//! once with its count, then its (docID, freq) postings).
+//! one run, grouped by term
 //!
 //! Because documents are parsed in order, every docID in run k+1 is larger
 //! than every docID in run k. The merger can therefore build a term's full

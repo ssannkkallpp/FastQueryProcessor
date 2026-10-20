@@ -1,14 +1,3 @@
-//! Reads the MS MARCO passage collection (`pid<TAB>passage` per line), assigns
-//! docIDs 0, 1, 2, ... in file order, tokenizes each passage, and writes:
-//!
-//! * `<dir>/runs/postings-NNNNNN.bin`  sorted runs of (term, docID, freq)
-//!   postings in the compressed binary format of `index::runfile`
-//!   (or `.tsv` text with `--ascii`, for debugging);
-//! * `<dir>/pagetable.bin`  docID -> (pid, length in terms, byte offset of
-//!   the passage in the collection file), see `index::doctable`;
-//! * `<dir>/meta.txt`  collection statistics (number of docs, average
-//!   length, number of runs, ...) needed by the merger and by BM25.
-//!
 //! Algorithm:
 //!
 //! 1. For each passage, tokenize and sort its terms locally to count each
