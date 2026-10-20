@@ -43,7 +43,7 @@ func (r *Reader) OpenList(term string) (*List, error) {
 	return &List{reader: r, entry: entry, descriptors: descriptors, block: -1}, nil
 }
 
-// DocFrequency returns the number of documents containing this term
+// DocFrequency returns the number of documents containing this term from lexicon
 func (list *List) DocFrequency() uint64 { return list.entry.DocFrequency }
 
 // NextGEQ returns the first remaining docID >= target, or EndDocID
