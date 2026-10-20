@@ -1,4 +1,4 @@
-// Package finalindex merges Rust IRN1 runs and reads a block-compressed index.
+// Package finalindex merges Rust IRN1 runs and reads a block-compressed index
 package finalindex
 
 import (
@@ -16,7 +16,7 @@ import (
 	"strings"
 )
 
-// runReader reads one sorted input run and holds its current term and compressed postings.
+// runReader reads one sorted input run and holds its current term and compressed postings
 type runReader struct {
 	file           *os.File
 	reader         *bufio.Reader
@@ -27,7 +27,7 @@ type runReader struct {
 	order          int
 }
 
-// indexOutput manages the final index files, buffered writers, and byte offsets.
+// indexOutput manages the final index files, buffered writers, and byte offsets
 type indexOutput struct {
 	files                                          []*os.File
 	postings_writer, blocks_writer, lexicon_writer *bufio.Writer
@@ -35,19 +35,19 @@ type indexOutput struct {
 	incomplete_marker                              string
 }
 
-// runDocumentRange tracks the smallest and largest docIDs seen in one input run.
+// runDocumentRange tracks the smallest and largest docIDs seen in one input run
 type runDocumentRange struct {
 	min_doc_id, max_doc_id uint64
 	has_postings           bool
 }
 
-// runHeap selects the reader with the smallest current term, breaking ties by run number.
+// runHeap selects the reader with the smallest current term, breaking ties by run number
 type runHeap []*runReader
 
-// Stats counts the distinct terms, postings, and blocks written by the merger.
+// Stats counts the distinct terms, postings, and blocks written by the merger
 type Stats struct{ Terms, Postings, Blocks uint64 }
 
-// termBlocks builds consecutive output blocks for one term across all contributing runs.
+// termBlocks builds consecutive output blocks for one term across all contributing runs
 type termBlocks struct {
 	output                              *indexOutput
 	block_size                          int
@@ -127,7 +127,7 @@ func (r *runReader) next() (bool, error) {
 	if r.count == 0 || r.count > math.MaxUint32 || r.last > math.MaxUint32 {
 		return false, fmt.Errorf("invalid posting count or last docID")
 	}
-	// A u32 varint occupies 1..5 bytes. Bound allocations using the input size too.
+	// A u32 varint occupies 1..5 bytes. Bound allocations using the input size too
 	st, e := r.file.Stat()
 	if e != nil {
 		return false, e
@@ -168,7 +168,7 @@ func (h runHeap) Swap(i, j int) { h[i], h[j] = h[j], h[i] }
 func (h *runHeap) Push(v any)   { *h = append(*h, v.(*runReader)) }
 func (h *runHeap) Pop() any     { a := *h; v := a[len(a)-1]; *h = a[:len(a)-1]; return v }
 
-// validate_metadata checks configuration and parser outputs before merging.
+// validate_metadata checks configuration and parser outputs before merging
 func validate_metadata(input_path string, blockSize int) (meta []byte, numDocs, expected uint64, paths []string, err error) {
 	if blockSize < 1 || blockSize > 65536 {
 		return nil, 0, 0, nil, fmt.Errorf("block size must be 1..65536")
@@ -215,27 +215,31 @@ func validate_metadata(input_path string, blockSize int) (meta []byte, numDocs, 
 }
 
 // Merge validates the inputs, merges one complete term at a time, and finalizes
-// a new output directory. Input runs and the on-disk formats remain unchanged.
+// a new output directory. Input runs and the on-disk formats remain unchanged
 func Merge(input_path, output_path string, blockSize int) (stats Stats, err error) {
 	collection_metadata, document_count, expected_postings, run_paths, err := validate_metadata(input_path, blockSize)
 	if err != nil {
 		return stats, err
 	}
 
+	// Open every run produced by the Rust executable and push them all to the heap
 	run_readers, term_heap, err := openRunReaders(run_paths)
 	if err != nil {
 		return stats, err
 	}
 	defer closeRunReaders(run_readers)
 
+	// Create the output files for the phase 2 merge
 	output, err := createIndexOutput(output_path)
 	if err != nil {
 		return stats, err
 	}
 	defer output.close()
+
+	// Track each input run's minimum and maximum docIDs to detect/avoid overlapping document ranges
 	run_ranges := make([]runDocumentRange, len(run_readers))
 
-	// Each call consumes this term from every matching run before starting another.
+	// Each call consumes this term from every matching run before starting another
 	for term_heap.Len() > 0 {
 		if err := mergeNextTerm(&term_heap, output, blockSize, document_count, run_ranges, &stats); err != nil {
 			return stats, err
@@ -253,7 +257,7 @@ func Merge(input_path, output_path string, blockSize int) (stats Stats, err erro
 	return stats, nil
 }
 
-// openRunReaders loads one term record per run and puts nonempty runs in the heap.
+// openRunReaders loads one term record per run and puts nonempty runs in the heap
 func openRunReaders(run_paths []string) ([]*runReader, runHeap, error) {
 	run_readers := make([]*runReader, 0, len(run_paths))
 	var term_heap runHeap
@@ -283,7 +287,7 @@ func closeRunReaders(run_readers []*runReader) {
 	}
 }
 
-// createIndexOutput creates the output directory, files, and format headers.
+// createIndexOutput creates the output directory, files, and format headers
 func createIndexOutput(output_path string) (*indexOutput, error) {
 	if err := os.Mkdir(output_path, 0755); err != nil {
 		return nil, err
@@ -331,7 +335,7 @@ func (output *indexOutput) writeHeaders() error {
 	return err
 }
 
-// close releases all remaining files, even if closing one of them fails.
+// close releases all remaining files, even if closing one of them fails
 func (output *indexOutput) close() error {
 	var first_error error
 	for _, file := range output.files {
@@ -351,9 +355,9 @@ func newTermBlocks(output *indexOutput, block_size int) *termBlocks {
 	}
 }
 
-// appendPosting encodes one posting and writes a block when it reaches capacity.
+// appendPosting encodes one posting and writes a block when it reaches capacity
 func (term_blocks *termBlocks) appendPosting(doc_id, frequency uint64, stats *Stats) error {
-	document_gap := doc_id // Every block restarts its gaps from zero.
+	document_gap := doc_id // Every block restarts its gaps from zero
 	if term_blocks.posting_count > 0 {
 		document_gap = doc_id - term_blocks.last_block_doc_id
 	}
@@ -374,6 +378,7 @@ func (term_blocks *termBlocks) flushBlock(stats *Stats) error {
 	if term_blocks.posting_count == 0 {
 		return nil
 	}
+
 	output := term_blocks.output
 	var descriptor [24]byte
 	binary.LittleEndian.PutUint32(descriptor[0:4], uint32(term_blocks.last_block_doc_id))
@@ -390,10 +395,12 @@ func (term_blocks *termBlocks) flushBlock(stats *Stats) error {
 	if _, err := output.postings_writer.Write(term_blocks.frequency_bytes); err != nil {
 		return err
 	}
+
 	output.postings_offset += uint64(len(term_blocks.document_bytes) + len(term_blocks.frequency_bytes))
 	output.blocks_offset += 24
 	term_blocks.block_count++
 	stats.Blocks++
+	// Clear out term_blocks struct for future blocks
 	term_blocks.posting_count = 0
 	term_blocks.document_bytes = term_blocks.document_bytes[:0]
 	term_blocks.frequency_bytes = term_blocks.frequency_bytes[:0]
@@ -412,7 +419,7 @@ func (term_blocks *termBlocks) finishTerm(term string, stats *Stats) error {
 	return nil
 }
 
-// mergeNextTerm gathers all records for the smallest term into consecutive blocks.
+// mergeNextTerm gathers all records for the smallest term into consecutive blocks
 func mergeNextTerm(term_heap *runHeap, output *indexOutput, block_size int, document_count uint64, run_ranges []runDocumentRange, stats *Stats) error {
 	term := (*term_heap)[0].term
 	term_blocks := newTermBlocks(output, block_size)
@@ -421,7 +428,7 @@ func mergeNextTerm(term_heap *runHeap, output *indexOutput, block_size int, docu
 		if err := appendRunRecord(run_reader, term_blocks, document_count, &run_ranges[run_reader.order], stats); err != nil {
 			return err
 		}
-		// Mutate the reader's current term while it is outside the heap.
+		// Mutate the reader's current term while it is outside the heap
 		has_record, err := run_reader.next()
 		if err != nil {
 			return err
@@ -434,11 +441,11 @@ func mergeNextTerm(term_heap *runHeap, output *indexOutput, block_size int, docu
 	return term_blocks.finishTerm(term, stats)
 }
 
-// appendRunRecord decodes one input list, validates it, and feeds output blocks.
+// appendRunRecord decodes one input list, validates it, and feeds output blocks
 func appendRunRecord(run_reader *runReader, term_blocks *termBlocks, document_count uint64, run_range *runDocumentRange, stats *Stats) error {
 	document_reader := bytes.NewReader(run_reader.docs)
 	frequency_reader := bytes.NewReader(run_reader.freqs)
-	var doc_id uint64
+	var doc_id uint64 // Starts at 0
 	for posting_number := uint64(0); posting_number < run_reader.count; posting_number++ {
 		document_gap, err := binary.ReadUvarint(document_reader)
 		if err != nil {
@@ -455,6 +462,7 @@ func appendRunRecord(run_reader *runReader, term_blocks *termBlocks, document_co
 		if doc_id >= document_count || term_blocks.document_frequency > 0 && doc_id <= term_blocks.last_term_doc_id {
 			return fmt.Errorf("%s: invalid or overlapping docID %d", run_reader.term, doc_id)
 		}
+		// Update current run's min/max docid
 		run_range.record(doc_id)
 		if err := term_blocks.appendPosting(doc_id, frequency, stats); err != nil {
 			return err
@@ -466,7 +474,7 @@ func appendRunRecord(run_reader *runReader, term_blocks *termBlocks, document_co
 	return nil
 }
 
-// record updates the range with a docID from any term in this run.
+// record updates the range with a docID from any term in this run
 func (run_range *runDocumentRange) record(doc_id uint64) {
 	if !run_range.has_postings {
 		run_range.min_doc_id, run_range.max_doc_id = doc_id, doc_id
@@ -497,7 +505,7 @@ func validateRunRanges(run_ranges []runDocumentRange) error {
 	return nil
 }
 
-// finish flushes and closes the index before publishing its metadata and marker.
+// finish flushes and closes the index before publishing its metadata and marker
 func (output *indexOutput) finish(input_path, output_path string, collection_metadata []byte, document_count uint64, block_size int, stats Stats) error {
 	for _, writer := range []*bufio.Writer{output.postings_writer, output.blocks_writer, output.lexicon_writer} {
 		if err := writer.Flush(); err != nil {

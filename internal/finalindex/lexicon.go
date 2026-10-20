@@ -6,7 +6,7 @@ import (
 	"os"
 )
 
-// LoadLexicon reads lexicon.tsv once at startup into a term lookup map.
+// LoadLexicon reads lexicon.tsv once at startup into a term lookup map
 func LoadLexicon(path string) (map[string]Entry, error) {
 	file, err := os.Open(path)
 	if err != nil {
