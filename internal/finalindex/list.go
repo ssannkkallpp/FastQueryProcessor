@@ -13,20 +13,21 @@ const EndDocID uint64 = 1 << 32
 // ErrTermNotFound reports a term absent from the index lexicon
 var ErrTermNotFound = errors.New("term not found")
 
-// List is a forward-only cursor. It owns its buffers, not the Reader's files
-// Opening loads descriptors only; document and frequency chunks are read lazily
-// A List is not safe for concurrent use. Its Reader must outlive it
+// List is a forward-only cursor.
 type List struct {
-	reader      *Reader
-	entry       Entry
-	descriptors []BlockDescriptor
-	block       int
-	position    int
-	docs        []uint32
-	freqs       []uint32
-	exhausted   bool
-	closed      bool
-	failure     error
+	reader *Reader
+	entry  Entry // Lexicon entry
+
+	descriptors []BlockDescriptor // Block descriptors for the current term
+	block       int               // Block number
+	position    int               // Position inside current block
+
+	docs  []uint32
+	freqs []uint32
+
+	exhausted bool
+	closed    bool
+	failure   error
 }
 
 // OpenList finds a term in the lexicon without reading any posting payload
@@ -83,6 +84,7 @@ func (list *List) NextGEQ(target uint64) (uint64, error) {
 			list.failure = fmt.Errorf("%s block %d: %w", list.entry.Term, block, err)
 			return EndDocID, list.failure
 		}
+		// Set frequencies to nil to discard them since they belong to the old block
 		list.block, list.position, list.docs, list.freqs = block, 0, docs, nil
 	}
 	remaining := list.docs[list.position:]

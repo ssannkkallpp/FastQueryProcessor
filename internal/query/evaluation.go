@@ -88,6 +88,7 @@ func conjunctiveResults(lists []listCursor, rank func(uint32, []listCursor) (flo
 		if !aligned {
 			continue
 		}
+
 		score, err := rank(uint32(candidate), lists)
 		if err != nil {
 			return nil, err
@@ -141,16 +142,19 @@ func disjunctiveResults(lists []listCursor, rank func(uint32, []listCursor) (flo
 		if candidate == finalindex.EndDocID {
 			return sortedResults(results), nil
 		}
+
 		matching = matching[:0]
 		for i, list := range lists {
 			if current[i] == candidate {
 				matching = append(matching, list)
 			}
 		}
+
 		score, err := rank(uint32(candidate), matching)
 		if err != nil {
 			return nil, err
 		}
+
 		retainResult(&results, Result{DocID: uint32(candidate), Score: score})
 		for i, list := range lists {
 			if current[i] == candidate {
