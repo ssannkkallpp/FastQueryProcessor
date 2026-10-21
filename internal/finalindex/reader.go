@@ -177,8 +177,6 @@ func decodeBlockDescriptor(header []byte) (BlockDescriptor, error) {
 	return descriptor, nil
 }
 
-type Posting struct{ DocID, Frequency uint32 }
-
 // readDocumentBlock reads only the docID chunk. Frequencies stay on disk
 func (r *Reader) readDocumentBlock(descriptor BlockDescriptor) ([]uint32, error) {
 	if err := validatePayloadDescriptor(descriptor); err != nil {
@@ -244,24 +242,6 @@ func validatePayloadDescriptor(descriptor BlockDescriptor) error {
 		return fmt.Errorf("invalid posting block descriptor")
 	}
 	return nil
-}
-
-// ReadPostingBlock fully decodes a block for inspection and interoperability
-// checks. Query algorithms use List.NextGEQ and List.GetFreq instead
-func (r *Reader) ReadPostingBlock(descriptor BlockDescriptor) ([]Posting, error) {
-	docs, err := r.readDocumentBlock(descriptor)
-	if err != nil {
-		return nil, err
-	}
-	freqs, err := r.readFrequencyBlock(descriptor)
-	if err != nil {
-		return nil, err
-	}
-	postings := make([]Posting, len(docs))
-	for i := range postings {
-		postings[i] = Posting{DocID: docs[i], Frequency: freqs[i]}
-	}
-	return postings, nil
 }
 
 // Document is the original Rust 16-byte page-table record
