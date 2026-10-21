@@ -5,8 +5,9 @@ pub const MAX_TERM_LEN: usize = 64;
 
 const SEP: u8 = 0; // separator byte
 const BAD: u8 = 1; // non-ASCII byte: poisons the current token
+const SKIP: u8 = 2; // punctuation or symbol: removed, token continues
 
-/// Byte class table: SEP, BAD, or the lowercased term character.
+/// Byte class table: SEP, BAD, SKIP, or the lowercased term character.
 const CLASS: [u8; 256] = {
     let mut t = [SEP; 256];
     let mut c = 0;
@@ -16,7 +17,8 @@ const CLASS: [u8; 256] = {
             b'a'..=b'z' | b'0'..=b'9' => b,
             b'A'..=b'Z' => b + (b'a' - b'A'),
             0x80..=0xff => BAD,
-            _ => SEP,
+            0x00..=0x20 | 0x7f => SEP, // space and control characters (\t \n \r ...)
+            _ => SKIP,                 // printable punctuation: ! " # ' - . / : @ [ ` { ~ ...
         };
         c += 1;
     }
@@ -54,6 +56,7 @@ impl Tokenizer {
                     len = 0;
                     bad = false;
                 }
+                SKIP => {}
                 BAD => bad = true,
                 lc => {
                     if len < MAX_TERM_LEN {
