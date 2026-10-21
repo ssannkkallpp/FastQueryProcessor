@@ -58,6 +58,7 @@ type termBlocks struct {
 	last_block_doc_id, last_term_doc_id uint64
 }
 
+// openRun validates the IRN1 header and opens a buffered run reader
 func openRun(filepath string, order int) (*runReader, error) {
 	file, e := os.Open(filepath)
 	if e != nil {
@@ -79,6 +80,7 @@ func openRun(filepath string, order int) (*runReader, error) {
 	return r, nil
 }
 
+// next loads one compressed term record and validates term order and record sizes
 func (r *runReader) next() (bool, error) {
 	if r.remaining == 0 {
 		// Validate the end of the file
@@ -347,6 +349,7 @@ func (output *indexOutput) close() error {
 	return first_error
 }
 
+// newTermBlocks initializes reusable encoding buffers for one term
 func newTermBlocks(output *indexOutput, block_size int) *termBlocks {
 	return &termBlocks{
 		output: output, block_size: block_size, descriptor_start: output.blocks_offset,
@@ -374,6 +377,7 @@ func (term_blocks *termBlocks) appendPosting(doc_id, frequency uint64, stats *St
 	return nil
 }
 
+// flushBlock writes the descriptor and compressed chunks then resets the block buffers
 func (term_blocks *termBlocks) flushBlock(stats *Stats) error {
 	if term_blocks.posting_count == 0 {
 		return nil
@@ -407,6 +411,7 @@ func (term_blocks *termBlocks) flushBlock(stats *Stats) error {
 	return nil
 }
 
+// finishTerm flushes the final block and records the term in the lexicon
 func (term_blocks *termBlocks) finishTerm(term string, stats *Stats) error {
 	if err := term_blocks.flushBlock(stats); err != nil {
 		return err
@@ -489,6 +494,7 @@ func (run_range *runDocumentRange) record(doc_id uint64) {
 	}
 }
 
+// validateRunRanges requires each nonempty run to contain only docIDs above earlier runs
 func validateRunRanges(run_ranges []runDocumentRange) error {
 	var previous_max_doc_id uint64
 	previous_run_has_postings := false
@@ -529,6 +535,7 @@ func (output *indexOutput) finish(input_path, output_path string, collection_met
 	return os.Remove(output.incomplete_marker)
 }
 
+// copyFile copies a file and reports any write or destination close error
 func copyFile(src, dst string) (err error) {
 	in, e := os.Open(src)
 	if e != nil {

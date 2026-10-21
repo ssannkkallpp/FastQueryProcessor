@@ -100,6 +100,7 @@ func Open(dir string) (r *Reader, err error) {
 	return r, nil
 }
 
+// Close releases the shared index files and returns the first close error
 func (r *Reader) Close() error {
 	var first error
 	for _, f := range []*os.File{r.posts, r.blocks, r.pages} {
@@ -159,6 +160,7 @@ func (r *Reader) BlockDescriptors(entry Entry) ([]BlockDescriptor, error) {
 	return descriptors, nil
 }
 
+// decodeBlockDescriptor decodes one descriptor and checks posting counts and chunk lengths
 func decodeBlockDescriptor(header []byte) (BlockDescriptor, error) {
 	descriptor := BlockDescriptor{
 		LastDocID:      binary.LittleEndian.Uint32(header[0:4]),
@@ -206,6 +208,7 @@ func (r *Reader) readDocumentBlock(descriptor BlockDescriptor) ([]uint32, error)
 	return docs, nil
 }
 
+// readFrequencyBlock decodes positive term frequencies for one posting block
 func (r *Reader) readFrequencyBlock(descriptor BlockDescriptor) ([]uint32, error) {
 	if err := validatePayloadDescriptor(descriptor); err != nil {
 		return nil, err
@@ -233,6 +236,7 @@ func (r *Reader) readFrequencyBlock(descriptor BlockDescriptor) ([]uint32, error
 	return freqs, nil
 }
 
+// validatePayloadDescriptor checks chunk sizes and offsets before reading posting data
 func validatePayloadDescriptor(descriptor BlockDescriptor) error {
 	count := uint64(descriptor.PostingCount)
 	docs, freqs := uint64(descriptor.DocumentBytes), uint64(descriptor.FrequencyBytes)
@@ -250,6 +254,7 @@ type Document struct {
 	Offset      uint64
 }
 
+// Document reads the fixed size page table record for a docID
 func (r *Reader) Document(docID uint32) (Document, error) {
 	var b [16]byte
 	if _, err := r.pages.ReadAt(b[:], int64(docID)*16); err != nil {
