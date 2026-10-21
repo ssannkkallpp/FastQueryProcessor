@@ -14,7 +14,7 @@
 //! in file order, but the table makes no such assumption.
 
 use std::fs::File;
-use std::io::{self, BufReader, BufWriter, Read, Write};
+use std::io::{self, BufWriter, Write};
 use std::path::Path;
 
 pub const RECORD_BYTES: usize = 16;
@@ -33,14 +33,6 @@ impl DocRecord {
         b[4..8].copy_from_slice(&self.len.to_le_bytes());
         b[8..16].copy_from_slice(&self.offset.to_le_bytes());
         b
-    }
-
-    pub fn from_bytes(b: &[u8]) -> Self {
-        Self {
-            pid: u32::from_le_bytes(b[0..4].try_into().unwrap()),
-            len: u32::from_le_bytes(b[4..8].try_into().unwrap()),
-            offset: u64::from_le_bytes(b[8..16].try_into().unwrap()),
-        }
     }
 }
 
@@ -62,20 +54,5 @@ impl DocTableWriter {
 
     pub fn finish(mut self) -> io::Result<()> {
         self.w.flush()
-    }
-}
-
-/// Load the whole table (~140 MB for MS MARCO; the query processor may prefer
-/// to keep only the `len` column in memory and seek for the rest).
-pub fn read_all(path: &Path) -> io::Result<Vec<DocRecord>> {
-    let mut r = BufReader::with_capacity(4 << 20, File::open(path)?);
-    let mut out = Vec::new();
-    let mut b = [0u8; RECORD_BYTES];
-    loop {
-        match r.read_exact(&mut b) {
-            Ok(()) => out.push(DocRecord::from_bytes(&b)),
-            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(out),
-            Err(e) => return Err(e),
-        }
     }
 }

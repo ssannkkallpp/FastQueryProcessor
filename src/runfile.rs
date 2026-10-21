@@ -29,7 +29,7 @@
 
 use crate::varbyte;
 use std::fs::File;
-use std::io::{self, BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
+use std::io::{self, BufWriter, Seek, SeekFrom, Write};
 use std::path::Path;
 
 pub const MAGIC: &[u8; 4] = b"IRN1";
@@ -99,129 +99,5 @@ impl RunWriter {
         f.seek(SeekFrom::Start(4))?;
         f.write_all(&self.num_terms.to_le_bytes())?;
         Ok((self.num_terms, self.bytes))
-    }
-}
-
-/// One record read back from a run file.
-#[derive(Default, Debug, Clone)]
-pub struct RunRecord {
-    pub term: Vec<u8>,
-    pub count: u32,
-    pub last_doc: u32,
-    /// varbyte docID gaps; the first gap is relative to 0.
-    pub docs: Vec<u8>,
-    /// varbyte frequencies.
-    pub freqs: Vec<u8>,
-}
-
-impl RunRecord {
-    /// Fully decode into `(docID, freq)` pairs (debugging / tests).
-    pub fn postings(&self) -> Vec<(u32, u32)> {
-        let mut out = Vec::with_capacity(self.count as usize);
-        let (mut dp, mut fp, mut doc) = (0usize, 0usize, 0u64);
-        for _ in 0..self.count {
-            doc += varbyte::decode(&self.docs, &mut dp);
-            out.push((doc as u32, varbyte::decode(&self.freqs, &mut fp) as u32));
-        }
-        out
-    }
-}
-
-/// Sequential reader over a run file. Reuses the caller's record buffers.
-pub struct RunReader {
-    r: BufReader<File>,
-    pub num_terms: u64,
-    remaining: u64,
-}
-
-impl RunReader {
-    pub fn open(path: &Path) -> io::Result<Self> {
-        Self::open_with_capacity(path, 1 << 20)
-    }
-
-    /// `buf_bytes` is the read-buffer size; the merger can give each run a few MB.
-    pub fn open_with_capacity(path: &Path, buf_bytes: usize) -> io::Result<Self> {
-        let mut r = BufReader::with_capacity(buf_bytes, File::open(path)?);
-        let mut magic = [0u8; 4];
-        r.read_exact(&mut magic)?;
-        if &magic != MAGIC {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("{}: not a run file (bad magic)", path.display()),
-            ));
-        }
-        let mut n = [0u8; 8];
-        r.read_exact(&mut n)?;
-        let num_terms = u64::from_le_bytes(n);
-        Ok(Self { r, num_terms, remaining: num_terms })
-    }
-
-    /// Read the next record into `rec`. Returns `Ok(false)` after the last one.
-    pub fn next_into(&mut self, rec: &mut RunRecord) -> io::Result<bool> {
-        if self.remaining == 0 {
-            return Ok(false);
-        }
-        self.remaining -= 1;
-        let tl = self.vb()? as usize;
-        rec.term.resize(tl, 0);
-        self.r.read_exact(&mut rec.term)?;
-        rec.count = self.vb()? as u32;
-        rec.last_doc = self.vb()? as u32;
-        let dl = self.vb()? as usize;
-        let fl = self.vb()? as usize;
-        rec.docs.resize(dl, 0);
-        self.r.read_exact(&mut rec.docs)?;
-        rec.freqs.resize(fl, 0);
-        self.r.read_exact(&mut rec.freqs)?;
-        Ok(true)
-    }
-
-    fn vb(&mut self) -> io::Result<u64> {
-        varbyte::read(&mut self.r)?
-            .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "run file truncated"))
-    }
-
-    /// True if every byte of the file has been consumed (sanity check).
-    pub fn at_eof(&mut self) -> io::Result<bool> {
-        Ok(self.r.fill_buf()?.is_empty())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn write_then_read_roundtrip() {
-        let dir = std::env::temp_dir().join(format!("runfile-test-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("run.bin");
-        let lists: Vec<(&[u8], Vec<(u32, u32)>)> = vec![
-            (b"apple", vec![(0, 1), (5, 3), (300, 1)]),
-            (b"zebra", vec![(7, 2)]),
-            (b"zzzzzzzzzlong", vec![(1, 1), (2, 1), (1_000_000, 200)]),
-        ];
-        let mut w = RunWriter::create(&path).unwrap();
-        let (mut d, mut f) = (Vec::new(), Vec::new());
-        for (t, ps) in &lists {
-            let last = encode_postings(ps.iter().copied(), &mut d, &mut f);
-            w.write_record(t, ps.len() as u32, last, &d, &f).unwrap();
-        }
-        let (terms, bytes) = w.finish().unwrap();
-        assert_eq!(terms, 3);
-        assert_eq!(bytes, std::fs::metadata(&path).unwrap().len());
-
-        let mut r = RunReader::open(&path).unwrap();
-        assert_eq!(r.num_terms, 3);
-        let mut rec = RunRecord::default();
-        for (t, ps) in &lists {
-            assert!(r.next_into(&mut rec).unwrap());
-            assert_eq!(rec.term, *t);
-            assert_eq!(rec.postings(), *ps);
-            assert_eq!(rec.last_doc, ps.last().unwrap().0);
-        }
-        assert!(!r.next_into(&mut rec).unwrap());
-        assert!(r.at_eof().unwrap());
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

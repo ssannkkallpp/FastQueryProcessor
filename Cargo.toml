@@ -12,10 +12,6 @@ path = "src/lib.rs"
 name = "parse"
 path = "src/bin/parse.rs"
 
-[[bin]]
-name = "dumprun"
-path = "src/bin/dumprun.rs"
-
 [profile.release]
 opt-level = 3
 lto = "thin"

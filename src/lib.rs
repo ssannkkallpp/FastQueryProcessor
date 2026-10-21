@@ -1,4 +1,4 @@
-//! Shared Rust modules used by the `parse` and `dumprun` executables.
+//! Rust modules used by the `parse` executable.
 //! The Go merger and query processor exchange data with Rust through files;
 //! they do not link against this library.
 //!
