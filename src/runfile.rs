@@ -8,24 +8,6 @@
 //! than every docID in run k. The merger can therefore build a term's full
 //! inverted list by concatenating that term's records from run 0, 1, 2, ...:
 //! it only has to k-way merge on terms, never re-sort docIDs.
-//!
-//! ## Binary layout (integers are varbyte unless noted)
-//!
-//! ```text
-//! header:   magic "IRN1" (4 bytes) | num_terms (u64 little-endian)
-//! record*:  term_len | term bytes
-//!           | count          number of postings in this record
-//!           | last_doc       largest docID in this record (absolute)
-//!           | docs_len       byte length of the docID block
-//!           | freqs_len      byte length of the frequency block
-//!           | docID block    `count` varbyte gaps; the first gap is relative to 0
-//!           | freq block     `count` varbyte term frequencies (>= 1)
-//! ```
-//!
-//! Records are sorted by term in plain byte order, which the merger must use
-//! too. DocIDs and frequencies sit in separate blocks (not interleaved), like
-//! the final index. `last_doc` lets the merger re-base the first gap of the
-//! next run's record without decoding this one.
 
 use crate::varbyte;
 use std::fs::File;

@@ -2,16 +2,11 @@
 //!
 //! One fixed-size 16-byte little-endian record per document, in docID order,
 //! so record *d* lives at byte offset `16 * d` and can be read with one seek:
-//!
-//! ```text
+
 //! pid     u32   original MS MARCO passage id (u32::MAX if not numeric)
 //! len     u32   document length in terms (needed by BM25)
 //! offset  u64   byte offset of the passage's line in the collection file
 //!               (lets the query processor fetch the text for snippets)
-//! ```
-//!
-//! For MS MARCO the docID normally equals the pid because docIDs are assigned
-//! in file order, but the table makes no such assumption.
 
 use std::fs::File;
 use std::io::{self, BufWriter, Write};

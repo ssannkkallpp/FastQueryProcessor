@@ -136,7 +136,7 @@ fn term_of<'a>(arena: &'a [u8], p: &Post) -> &'a [u8] {
 /// Compare two terms given their 8-byte prefixes. Terms contain no zero
 /// bytes, so the zero-padded big-endian prefix order agrees with byte-wise
 /// term order, and equal prefixes of two short (<= 8 byte) terms mean equal
-/// terms. Only long terms with equal prefixes need a look at the remaining bytes.
+/// terms.
 #[inline]
 fn cmp_terms(pa: u64, a: &[u8], pb: u64, b: &[u8]) -> std::cmp::Ordering {
     pa.cmp(&pb).then_with(|| {

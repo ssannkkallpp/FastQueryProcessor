@@ -1,15 +1,4 @@
 //! Tokenization: raw passage bytes -> lowercase terms.
-//!
-//! * ASCII letters and digits form terms; letters are lowercased.
-//! * Every other ASCII byte (space, punctuation, symbols, control chars) is a
-//!   separator, so "don't" -> ["don", "t"] and "e-mail" -> ["e", "mail"].
-//! * A token containing any non-ASCII byte (>= 0x80) is dropped whole. This
-//!   "just ignores" text in other scripts, as the assignment allows, without
-//!   leaving junk fragments behind ("café" is dropped, not indexed as "caf"),
-//!   and works on arbitrary bytes, so malformed UTF-8 can never cause a failure.
-//! * Tokens longer than [`MAX_TERM_LEN`] bytes are dropped.
-//!
-//! No stemming and no stopword removal: every remaining term is indexed.
 
 /// Longest term (in bytes) that is indexed; longer tokens are dropped.
 pub const MAX_TERM_LEN: usize = 64;
